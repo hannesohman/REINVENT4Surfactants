@@ -24,7 +24,7 @@ module load virtualenv/20.32.0-GCCcore-14.3.0 SciPy-bundle/2025.07-gfbf-2025b
 source venv/bin/activate
 
 # Start low-priority filler
-nice -n 19 python -u gpu_keepalive-claude.py --mat_size 200 --sleep_time 0.7 &
+nice -n 19 python -u gpu_keepalive.py --mat_size 200 --sleep_time 0.7 &
 FILLER_PID=$!
 trap "kill $FILLER_PID 2>/dev/null" EXIT
 
