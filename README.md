@@ -22,8 +22,12 @@ Reinvent can installed from the official github:
     ```
 
 ## How to use:
-Edit the *config.json* file contained in the main folder. Here you can set the desired parameters for your run.
+Edit the `config.json` file contained in the main folder. Here you can set the desired parameters for your run.
 
 + **WORKFLOW_NAME:** The version folder of the framework.
 + **GROUP_NAME:** A name you can set to more easily organize runs into groups, for example if they all belong to a single project.
 + **RUN_NAME:** The name of run you are about to do. This will be found inside the **GROUP_NAME** folder and will have a timestamp at the end of the folder name.
+
+Then run `python main.py`, this will create the file structure described in the config and make a copy of the config to place there.
+
+It will then start an `sbatch` job.
