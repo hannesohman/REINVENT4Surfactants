@@ -74,6 +74,29 @@ def run_prediction(
     X = np.array(descriptors, dtype=np.float32)
     # print(f"[Surrogate] {X.shape} descriptor matrix calculated")
 
+    # # Detect bad rows to prevent infinite values from breaking XGBoost
+    # bad_mask = ~np.isfinite(X)
+
+    # if np.any(bad_mask):
+    #     # print("[Surrogate] Non-finite descriptor values detected")
+
+    #     rows = np.where(np.any(bad_mask, axis=1))[0]
+
+    #     for r in rows[:10]:
+    #         print(f"Bad molecule row {r}")
+    #         # print("Values:", X[r])
+
+    #     # Replace problematic values with finite placeholders
+    #     X = np.nan_to_num(
+    #         X,
+    #         nan=0.0,
+    #         posinf=np.finfo(np.float32).max,
+    #         neginf=np.finfo(np.float32).min
+    #     )
+
+    # # Clipping
+    # X = np.clip(X, np.finfo(np.float32).min, np.finfo(np.float32).max)
+
     # Apply scaler if present
     if scaler is not None:
         # print("[Surrogate] Applying scaler to descriptors")
