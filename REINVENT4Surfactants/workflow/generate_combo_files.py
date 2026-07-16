@@ -132,6 +132,20 @@ params.pCMC_max_value = {scoring_package['pCMC']['max_value']}
 
 
 
+        elif name.endswith("_Uncertainty"):
+            scoring_components += f"""
+[[stage.scoring.component]]
+[stage.scoring.component.UncertaintyPenalty]
+[[stage.scoring.component.UncertaintyPenalty.endpoint]]
+name = "{name}"
+weight = {weight:.2f}
+params.model_path = "{scoring_package['model_path']}"
+params.target = "{scoring_package['target']}"
+params.min_value = {scoring_package['min_value']}
+params.max_value = {scoring_package['max_value']}
+params.minimize = {str(scoring_package.get("minimize", True)).lower()}
+"""
+
         else:
             scoring_components += f"""
 [[stage.scoring.component]]

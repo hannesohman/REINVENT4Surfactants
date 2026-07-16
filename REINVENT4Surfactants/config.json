@@ -73,7 +73,7 @@
             }
         },
         "OriginPull": {
-            "distance_exponent": 1.0, 
+            "distance_exponent": 1.0,
             "max_score": 1.0,
             "SurfTen": { "minimize": true, "pkl": "final_model_surface_tension_avg.joblib",
                 "min_value": 173.98984, "max_value": 594.85364
@@ -81,6 +81,36 @@
             "pCMC": { "minimize": true, "pkl": "pcmc_model.joblib",
                 "min_value": 0.0089955596692448, "max_value": 6.79588001734408
             }
+        },
+        "pCMC_Uncertainty": {
+            "minimize": true,
+            "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+            "target": "pCMC",
+            "min_value": 0.0476, "max_value": 0.6120
+        },
+        "SurfTen_Uncertainty": {
+            "minimize": true,
+            "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+            "target": "surface_tension_avg",
+            "min_value": 2.806, "max_value": 18.979
+        },
+        "DMOL_Uncertainty": {
+            "minimize": true,
+            "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+            "target": "D_MOL",
+            "min_value": 0.002467, "max_value": 0.030539
+        },
+        "DSOL_Uncertainty": {
+            "minimize": true,
+            "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+            "target": "D_SOL",
+            "min_value": 0.008808, "max_value": 0.113807
+        },
+        "Visc_Uncertainty": {
+            "minimize": true,
+            "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+            "target": "viscosity",
+            "min_value": 0.0000044303, "max_value": 0.0000535220
         }
     }
 }

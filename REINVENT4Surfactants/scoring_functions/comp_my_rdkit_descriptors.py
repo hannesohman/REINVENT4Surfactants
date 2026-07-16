@@ -49,7 +49,7 @@ class MyRDKitDescriptors:
 
         for s in smiles:
             mol = Chem.MolFromSmiles(s)
-            result = self.calc(mol, missingVal=np.NaN)
+            result = self.calc(mol, missingVal=np.nan)
             scores.append(np.array(result))
 
         scores = np.array(scores).transpose()
