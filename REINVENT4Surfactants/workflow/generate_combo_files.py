@@ -146,6 +146,19 @@ params.max_value = {scoring_package['max_value']}
 params.minimize = {str(scoring_package.get("minimize", True)).lower()}
 """
 
+        elif name == "ZincPlausibility":
+            scoring_components += f"""
+[[stage.scoring.component]]
+[stage.scoring.component.ZincPlausibility]
+[[stage.scoring.component.ZincPlausibility.endpoint]]
+name = "{name}"
+weight = {weight:.2f}
+params.reference_path = "{scoring_package['reference_path']}"
+params.min_value = {scoring_package['min_value']}
+params.max_value = {scoring_package['max_value']}
+params.minimize = {str(scoring_package['minimize']).lower()}
+"""
+
         else:
             scoring_components += f"""
 [[stage.scoring.component]]
@@ -267,7 +280,7 @@ if __name__ == "__main__":
     N_MULTIPLES = 4
 
     SCORING_FUNCTIONS = {
-        "pCMC": { "minimize": True, "pkl": "pcmc_model.joblib",
+        "pCMC": { "minimize": False, "pkl": "pcmc_model.joblib",  # higher pCMC = lower CMC = better
             "min_value": 0.0089955596692448, "max_value": 6.79588001734408
         },
         "SurfTen": { "minimize": True, "pkl": "final_model_surface_tension_avg.joblib",

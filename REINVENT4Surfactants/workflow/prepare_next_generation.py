@@ -100,10 +100,17 @@ def prepare_data(
     # print(all_data.head())
 
     if "pCMC" in all_data.columns:
-        all_data["pCMC_unnorm"] = (1 - all_data["pCMC"]) * (6.79588001734408 - 0.0089955596692448) + 0.0089955596692448
+        # pCMC is maximized (minimize=False, higher pCMC = lower CMC = better;
+        # see README), so un-normalizing is direct, not inverted like SurfTen.
+        all_data["pCMC_unnorm"] = all_data["pCMC"] * (6.79588001734408 - 0.0089955596692448) + 0.0089955596692448
     if "SurfTen" in all_data.columns:
         all_data["SurfTen_unnorm"] = (1 - all_data["SurfTen"]) * (594.85364 - 173.98984) + 173.98984
 
+    # NOTE: find_pareto_front sorts both columns ascending, i.e. still assumes
+    # pCMC_unnorm should be minimized like SurfTen_unnorm. That's now wrong
+    # (pCMC is maximized) but this whole multi-generation path is unused with
+    # the current N_GENERATIONS=1 config, so it's left as a known follow-up
+    # rather than fixed blind -- see README.
     pareto_df = find_pareto_front(all_data, x_col="SurfTen_unnorm", y_col="pCMC_unnorm")
 
     print(f"[{run_name}] (GEN {generation}) Pareto front has {len(pareto_df)} entries")

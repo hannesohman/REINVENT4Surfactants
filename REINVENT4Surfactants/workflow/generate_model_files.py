@@ -70,25 +70,24 @@ def generate_tl_toml(
     return _write_text(toml_path, make_tl_toml(try_path, generation, num_epochs=num_epochs))
 
 
+REINVENT_PYTHON = "/proj/berzelius-2026-62/users/x_ribec/software/reinvent4-env/bin/python"
+
+
 def make_tl_jobscript(
     run_path: Path,
     generation: int,
     walltime: str = "02:00:00",
-    gpus_per_node: str = "A40:1"
+    gpus_per_node: str = "1"
     ) -> str:
     return f"""#!/bin/bash
-#SBATCH -A NAISS2025-5-462
-#SBATCH -p alvis
+#SBATCH --account=Berzelius-2026-62
+#SBATCH --partition=berzelius
 #SBATCH -t {walltime}
-#SBATCH --gpus-per-node={gpus_per_node}
+#SBATCH --gpus={gpus_per_node}
 #SBATCH -J TL_{run_path.name}_g{generation}
 #SBATCH -o {run_path}/generation_{generation}/model/TL_generation_{generation}.out
 
-module purge
-module load virtualenv/20.32.0-GCCcore-14.3.0 SciPy-bundle/2025.07-gfbf-2025b
-source venv/bin/activate
-
-python -u -m reinvent -l {run_path}/generation_{generation}/model/TL_generation_{generation}.log \
+{REINVENT_PYTHON} -u -m reinvent -l {run_path}/generation_{generation}/model/TL_generation_{generation}.log \
     {run_path}/generation_{generation}/model/TL_generation_{generation}.toml
 """
 
@@ -114,32 +113,23 @@ def generate_tl_jobscript(
 
 def make_sl_jobscript(
         meta_config: dict,
-        run_path: Path, 
-        generation: int,  
+        run_path: Path,
+        generation: int,
         walltime: str = "04:00:00",
-        gpus_per_node: str = "A40:1"
+        gpus_per_node: str = "1"
         ) -> str:
-    
+
     workflow_name = meta_config.get("WORKFLOW_NAME")
 
     return f"""#!/bin/bash
-#SBATCH -A NAISS2025-5-462
-#SBATCH -p alvis
+#SBATCH --account=Berzelius-2026-62
+#SBATCH --partition=berzelius
 #SBATCH -t {walltime}
-#SBATCH --gpus-per-node={gpus_per_node}
+#SBATCH --gpus={gpus_per_node}
 #SBATCH -J {run_path.name}_G{generation}
 #SBATCH -o {run_path}/generation_{generation}/generation_{generation}.out
 
-module purge
-module load virtualenv/20.32.0-GCCcore-14.3.0 SciPy-bundle/2025.07-gfbf-2025b
-source venv/bin/activate
-
-# Start low-priority filler
-nice -n 19 python -u gpu_keepalive.py &
-FILLER_PID=$!
-trap "kill $FILLER_PID 2>/dev/null" EXIT
-
-python -u {workflow_name}/run_synthetic_data.py --folder="{run_path}/generation_{generation}"
+{REINVENT_PYTHON} -u {workflow_name}/run_synthetic_data.py --folder="{run_path}/generation_{generation}"
 """
 
 def generate_sl_jobscript(
@@ -167,34 +157,24 @@ def generate_sl_jobscript(
 
 def make_sl_jobscript_for_combo(
         meta_config: dict,
-        run_path: Path, 
-        generation: int, 
+        run_path: Path,
+        generation: int,
         combo_path: Path,
         walltime: str = "01:30:00",
-        gpus_per_node: str = "A40:1"
+        gpus_per_node: str = "1"
         ) -> str:
-    
+
     workflow_name = meta_config.get("WORKFLOW_NAME")
 
     return f"""#!/bin/bash
-#SBATCH -A NAISS2025-5-462
-#SBATCH -p alvis
+#SBATCH --account=Berzelius-2026-62
+#SBATCH --partition=berzelius
 #SBATCH -t {walltime}
-#SBATCH --gpus-per-node={gpus_per_node}
+#SBATCH --gpus={gpus_per_node}
 #SBATCH -J {run_path.name}_G{generation}_{combo_path.name}
 #SBATCH -o {combo_path}/G_{generation}_{combo_path.name}.out
 
-module purge
-module load virtualenv/20.32.0-GCCcore-14.3.0 SciPy-bundle/2025.07-gfbf-2025b
-source venv/bin/activate
-
-
-# Start low-priority filler
-nice -n 19 python -u gpu_keepalive.py &
-FILLER_PID=$!
-trap "kill $FILLER_PID 2>/dev/null" EXIT
-
-python -u {workflow_name}/run_synthetic_data.py --folder="{combo_path}"
+{REINVENT_PYTHON} -u {workflow_name}/run_synthetic_data.py --folder="{combo_path}"
 """
 
 

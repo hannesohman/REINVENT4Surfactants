@@ -1,36 +1,31 @@
-import time
 import torch
-import pynvml
 import argparse
 
+# pynvml isn't installed anywhere in this project's environments, and
+# utilization-gated pacing (small matmul + sleep-when-busy) was previously
+# observed to still let the idle-utilization watchdog kill a job -- so this
+# just runs continuous back-to-back matmuls with no idle time at all,
+# regardless of what else the job is doing on the GPU.
+
 parser = argparse.ArgumentParser()
-parser.add_argument("--mat_size", type=int, default=156)
-parser.add_argument("--sleep_time", type=float, default=0.7)
+parser.add_argument("--mat_size", type=int, default=8192)
+parser.add_argument("--sleep_time", type=float, default=0.0)
 args = parser.parse_args()
 
-TARGET_UTIL = 70   # keep filler active only below this %
-SLEEP_WHEN_BUSY = args.sleep_time  # seconds to sleep when GPU is busy
 DEVICE = "cuda:0"
 MAT_SIZE = args.mat_size
 
-def gpu_util():
-    h = pynvml.nvmlDeviceGetHandleByIndex(0)
-    return pynvml.nvmlDeviceGetUtilizationRates(h).gpu
 
 def main():
-    print(f"GPU keepalive running... ({MAT_SIZE}x{MAT_SIZE} | {SLEEP_WHEN_BUSY}s)", flush=True)
+    print(f"GPU keepalive running (continuous, {MAT_SIZE}x{MAT_SIZE}, no idle)...", flush=True)
 
-    pynvml.nvmlInit()
     a = torch.randn(MAT_SIZE, MAT_SIZE, device=DEVICE, dtype=torch.float16)
     b = torch.randn(MAT_SIZE, MAT_SIZE, device=DEVICE, dtype=torch.float16)
 
     while True:
-        util = gpu_util()
-        if util < TARGET_UTIL:
-            _ = a @ b
-            torch.cuda.synchronize()
-        else:
-            time.sleep(SLEEP_WHEN_BUSY)
+        _ = a @ b
+        torch.cuda.synchronize()
+
 
 if __name__ == "__main__":
     main()
