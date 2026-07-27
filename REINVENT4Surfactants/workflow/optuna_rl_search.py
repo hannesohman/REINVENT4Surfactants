@@ -30,25 +30,32 @@ import pandas as pd
 
 REINVENT_PYTHON = sys.executable
 
+MODELS_PKL = "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl"
+
 SCORING_FUNCTIONS = {
     # pCMC = -log10(CMC): HIGHER pCMC = LOWER CMC = more efficient surfactant,
     # so it's maximized (minimize=False) -- confirmed empirically 2026-07-21,
     # see README. (Was minimize=True until this fix -- a real bug.)
+    #
+    # Uncertainty is combined via UWO (Coste et al. 2024, ICLR): combined =
+    # point_score - lambda_weight * uncertainty_score, inside a single
+    # UncertaintyWeightedScore component -- replaces the old separate
+    # pCMC_Uncertainty/SurfTen_Uncertainty geometric-mean terms (2026-07-22).
     "pCMC": {"minimize": False, "pkl": "pcmc_model.joblib",
-              "min_value": 0.0089955596692448, "max_value": 6.79588001734408},
+              "min_value": 0.0089955596692448, "max_value": 6.79588001734408,
+              "uncertainty_model_path": MODELS_PKL, "uncertainty_target": "pCMC",
+              "uncertainty_min_value": 0.0476, "uncertainty_max_value": 0.6120,
+              "lambda_weight": 0.5},
     "SurfTen": {"minimize": True, "pkl": "final_model_surface_tension_avg.joblib",
-                 "min_value": 173.98984, "max_value": 594.85364},
-    "pCMC_Uncertainty": {"minimize": True,
-                          "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
-                          "target": "pCMC", "min_value": 0.0476, "max_value": 0.6120},
-    "SurfTen_Uncertainty": {"minimize": True,
-                             "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
-                             "target": "surface_tension_avg", "min_value": 2.806, "max_value": 18.979},
+                 "min_value": 173.98984, "max_value": 594.85364,
+                 "uncertainty_model_path": MODELS_PKL, "uncertainty_target": "surface_tension_avg",
+                 "uncertainty_min_value": 2.806, "uncertainty_max_value": 18.979,
+                 "lambda_weight": 0.5},
     "ZincPlausibility": {"minimize": False,
                           "reference_path": "data/zinc_reference_profile.json.gz",
                           "min_value": 0.0, "max_value": 1.0},
 }
-WEIGHT = 0.2  # equal-weighted, matching config.json
+WEIGHT = 1 / 3  # equal-weighted, matching config.json (3 terms now, was 5)
 
 
 def make_toml(trial_dir: Path, agent_file: str, prior_file: str, sigma: float,
@@ -85,6 +92,23 @@ params.reference_path = "{pkg['reference_path']}"
 params.min_value = {pkg['min_value']}
 params.max_value = {pkg['max_value']}
 params.minimize = {str(pkg['minimize']).lower()}
+"""
+        elif "uncertainty_model_path" in pkg:
+            components += f"""
+[[stage.scoring.component]]
+[stage.scoring.component.UncertaintyWeightedScore]
+[[stage.scoring.component.UncertaintyWeightedScore.endpoint]]
+name = "{name}"
+weight = {weight:.2f}
+params.model_path = "models/{pkg['pkl']}"
+params.min_value = {pkg['min_value']}
+params.max_value = {pkg['max_value']}
+params.minimize = {str(pkg['minimize']).lower()}
+params.uncertainty_model_path = "{pkg['uncertainty_model_path']}"
+params.uncertainty_target = "{pkg['uncertainty_target']}"
+params.uncertainty_min_value = {pkg['uncertainty_min_value']}
+params.uncertainty_max_value = {pkg['uncertainty_max_value']}
+params.lambda_weight = {pkg['lambda_weight']}
 """
         else:
             components += f"""

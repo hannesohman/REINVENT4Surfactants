@@ -159,6 +159,28 @@ params.max_value = {scoring_package['max_value']}
 params.minimize = {str(scoring_package['minimize']).lower()}
 """
 
+        elif "uncertainty_model_path" in scoring_package:
+            # Uncertainty-Weighted Optimization (UWO, Coste et al. 2024):
+            # R_UWO = point_estimate - lambda * ensemble_uncertainty, combined
+            # inside a single component rather than as two separate geometric-
+            # mean terms (the old pCMC_Uncertainty/SurfTen_Uncertainty split).
+            scoring_components += f"""
+[[stage.scoring.component]]
+[stage.scoring.component.UncertaintyWeightedScore]
+[[stage.scoring.component.UncertaintyWeightedScore.endpoint]]
+name = "{name}"
+weight = {weight:.2f}
+params.model_path = "models/{scoring_package['pkl']}"
+params.min_value = {scoring_package['min_value']}
+params.max_value = {scoring_package['max_value']}
+params.minimize = {str(scoring_package['minimize']).lower()}
+params.uncertainty_model_path = "{scoring_package['uncertainty_model_path']}"
+params.uncertainty_target = "{scoring_package['uncertainty_target']}"
+params.uncertainty_min_value = {scoring_package['uncertainty_min_value']}
+params.uncertainty_max_value = {scoring_package['uncertainty_max_value']}
+params.lambda_weight = {scoring_package['lambda_weight']}
+"""
+
         else:
             scoring_components += f"""
 [[stage.scoring.component]]

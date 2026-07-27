@@ -97,39 +97,62 @@ A typical run with the current default config (100 TL epochs on ~1400 molecules,
 replicate RL runs × 20 steps × batch 256) takes well under an hour end-to-end once
 jobs are scheduled — see `runs/test/` for worked examples.
 
-## Uncertainty-aware scoring (`UncertaintyPenalty`)
+## Uncertainty-aware scoring (`UncertaintyWeightedScore`)
 
 The surrogate property models in `models/` (pCMC, SurfTen, DMOL, DSOL, Visc) are
 single point-estimate XGBoost regressors and do not carry any native uncertainty
-estimate. `scoring_functions/comp_uncertainty.py` instead uses the 25-member
-XGBoost ensemble (5 outer cross-validation splits x 5 fold models each, one such
-ensemble per property) found in
+estimate. Both the current component and its predecessor instead use the
+25-member XGBoost ensemble (5 outer cross-validation splits x 5 fold models each,
+one such ensemble per property) found in
 `surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl` — see that
 project's `surrogate.py` (training) and `predict.py` (reference inference /
 uncertainty implementation) for how it was generated and is meant to be used.
+For a given target property, a molecule is run through every fold model in its
+ensemble and the standard deviation across the 25 predictions is used as the
+uncertainty measure — the Frequentist "deep ensembles" strategy described in
+`test/uncertainty_quantification.txt`.
 
-For a given target property, the component runs a molecule through every fold
-model in its ensemble and uses the standard deviation across the 25 predictions
-as the uncertainty measure — the Frequentist "deep ensembles" strategy described
-in `test/uncertainty_quantification.txt`. The std is normalized with
-`min_value`/`max_value` and, when `minimize=true`, inverted so that low ensemble
-disagreement (reliable prediction) scores near 1 and high disagreement
-(unreliable prediction) scores near 0.
+**As of 2026-07-22, uncertainty is combined via Uncertainty-Weighted Optimization
+(UWO)**, following Coste et al. 2024, *"Reward Model Ensembles Help Mitigate
+Overoptimization"* (ICLR 2024): `R_UWO = mean - lambda * Var`, i.e. the
+uncertainty penalty is subtracted directly from a property's own score, inside a
+single component (`scoring_functions/comp_uncertainty_weighted.py`,
+`UncertaintyWeightedScore`), rather than being a separate endpoint combined only
+via the outer geometric mean (the previous "Score Modulation" strategy, still
+available as `scoring_functions/comp_uncertainty.py`'s `UncertaintyPenalty` for
+any endpoint that still wants point-estimate and uncertainty scored
+independently — e.g. DMOL/DSOL/Visc in `ADDON_FUNCTIONS`, unused by the current
+default objective).
 
-It is added as a normal scoring endpoint per property (weighted alongside the
-point-estimate score in the geometric-mean MPO — the "Score Modulation" strategy
-from the paper). `target` must match one of the keys in `models.pkl` (`pCMC`,
-`AW_ST_CMC`, `Gamma_max`, `Area_min`, `pC20`, `D_MOL`, `D_SOL`,
-`surface_tension_avg`, `viscosity`); `min_value`/`max_value` default to the
-5th/95th percentile of the ensemble std observed over the SurfPro-MD training set
-for that property.
+For each property, `UncertaintyWeightedScore`:
+1. Computes the point estimate from the existing single joblib model (e.g.
+   `pcmc_model.joblib`), normalized/inverted into `[0,1]` exactly as the plain
+   `SurrogateModel` component does (higher = better, regardless of the
+   property's own `minimize` direction).
+2. Computes the ensemble std as above, normalized into `[0,1]` against
+   `uncertainty_min_value`/`uncertainty_max_value` (the 5th/95th percentile of
+   ensemble std over the SurfPro-MD training set) — **not** inverted here: 0 =
+   low disagreement/certain, 1 = high disagreement/uncertain.
+3. Returns `clip(point_score - lambda_weight * uncertainty_score, 0, 1)` as a
+   single combined score for that property.
 
-**As of 2026-07-17, `config.json`'s default `WEIGHT_COMBOS` optimizes pCMC, SurfTen,
-`pCMC_Uncertainty` and `SurfTen_Uncertainty` with equal 0.25 weight each** (a plain
-`["pCMC", 0.5], ["SurfTen", 0.5]` run — no uncertainty penalty — was found to reward
-molecules the surrogates are confidently wrong about; see Findings below). **As of
-2026-07-21 this became a 5-way, 0.2-weight-each split with `ZincPlausibility` added**
-— see below.
+`lambda_weight` defaults to 0.5 for both `pCMC` and `SurfTen` — the paper found
+results fairly robust to its exact value (0.05-1.0 all performed reasonably in
+their setup), so this wasn't tuned further. Params: `model_path`, `min_value`,
+`max_value`, `minimize` (point estimate, same as `SurrogateModel`) plus
+`uncertainty_model_path`, `uncertainty_target`, `uncertainty_min_value`,
+`uncertainty_max_value`, `lambda_weight`.
+
+**Practical effect on `config.json`**: the old 4-endpoint split
+(`pCMC`/`SurfTen`/`pCMC_Uncertainty`/`SurfTen_Uncertainty`) collapses into 2
+endpoints (`pCMC`/`SurfTen`, each with uncertainty baked in), so
+`WEIGHT_COMBOS` is now a 3-way split with `ZincPlausibility`
+(`pCMC`: 0.334, `SurfTen`: 0.333, `ZincPlausibility`: 0.333) instead of the
+previous 5-way 0.2-each split. Verified with a smoke-test `staged_learning` run
+through the actual REINVENT pipeline (not just standalone) before adoption —
+see Findings below for the result and for history: original 2026-07-17 addition
+of uncertainty (4-way, 0.25 each) and the 2026-07-21 addition of
+`ZincPlausibility` (5-way, 0.2 each) that this supersedes.
 
 ## Structural plausibility scoring (`ZincPlausibility`)
 
@@ -1108,3 +1131,46 @@ visually: the optimized panel has noticeably more gold "rediscovered" diamonds
 than the default panel (71 vs. 35, out of 130 holdout molecules, in the runs
 plotted here) -- matching the aggregate rediscovery-rate numbers in the
 comparison table above.
+
+## Findings (2026-07-22): switched uncertainty combination to UWO
+
+Prompted by a direct question about whether this project's uncertainty
+handling matched the approach in Coste et al. 2024 ("Reward Model Ensembles
+Help Mitigate Overoptimization", ICLR 2024) -- it didn't. That paper compares
+several ways to combine an ensemble's per-member reward estimates: **mean**
+(not conservative -- a single overestimating member can still be exploited),
+**worst-case** (minimum across members -- maximally conservative, no
+hyperparameter, but can cost performance), and **uncertainty-weighted
+optimization (UWO)**: `R_UWO = mean - lambda * Var`, subtracting the
+ensemble's variance directly from its mean reward. Their experiments (RLHF
+fine-tuning of language models, BoN and PPO) found UWO and worst-case both
+practically eliminate reward-model overoptimization and outperform single
+reward models, with UWO's results fairly robust to `lambda`'s exact value.
+
+This project's prior approach (`UncertaintyPenalty`, "Score Modulation") was
+structurally different: point-estimate score and ensemble-uncertainty score
+were two *separate* endpoints, only ever combined via the outer geometric
+mean alongside every other objective term -- closer to just adding another
+independent scoring criterion than to actually *penalizing* a property's own
+score for being uncertain. Switched to a direct UWO-style combination
+(`UncertaintyWeightedScore`, see "Uncertainty-aware scoring" above): each of
+`pCMC`/`SurfTen` now produces one combined score,
+`clip(point_score - 0.5 * uncertainty_score, 0, 1)`, computed inside a single
+component from a single ensemble-inference pass, and `config.json`'s
+`WEIGHT_COMBOS` collapsed from a 5-way 0.2-each split down to a 3-way split
+(`pCMC`/`SurfTen`/`ZincPlausibility`, ~1/3 each).
+
+Verified end-to-end (not just standalone) with a smoke-test `staged_learning`
+run through the real REINVENT pipeline before adopting this as the default --
+see the job log for confirmation the component loads and scores correctly
+inside actual RL generation, not just in isolation.
+
+**Not yet updated to match**: `workflow/build_zinc_holdouts.py`,
+`workflow/build_zinc_reference.py`, and
+`workflow/build_surfpro_stratified_holdout.py` still rank ZINC/SurfPro by the
+old 4-term geometric-mean composite (point estimate and uncertainty as
+separate factors), since redoing that would mean re-deriving the ZINC
+tiers/holdouts and retraining the TL checkpoint again -- a substantial,
+expensive re-run not requested here. This is a known inconsistency between the
+live RL objective and the offline "what counts as a good molecule" ranking
+used to build holdouts; flagging it rather than fixing it blind.

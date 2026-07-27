@@ -40,30 +40,39 @@ CONFIGS = {
 }
 
 # Two objective variants to isolate the effect of ZincPlausibility itself:
-#  - "with_zinc": current config.json default -- 5-term, 0.2 weight each.
-#  - "no_zinc": the original (pre-2026-07-21) 4-term uncertainty-aware
-#    objective -- pCMC/SurfTen/pCMC_Uncertainty/SurfTen_Uncertainty, 0.25 each.
+#  - "with_zinc": current config.json default -- pCMC/SurfTen (each with UWO
+#    uncertainty baked in, see below) + ZincPlausibility, 1/3 weight each.
+#  - "no_zinc": pCMC/SurfTen only (UWO uncertainty still applied per-property),
+#    0.5 weight each -- isolates ZincPlausibility's effect from uncertainty
+#    handling, which is otherwise identical between the two variants.
+#
+# Uncertainty is combined via UWO (Coste et al. 2024, ICLR): combined =
+# point_score - lambda_weight * uncertainty_score, inside a single
+# UncertaintyWeightedScore component per property -- replaces the old separate
+# pCMC_Uncertainty/SurfTen_Uncertainty geometric-mean terms (2026-07-22).
+_MODELS_PKL = "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl"
+
 SCORING_FUNCTIONS_WITH_ZINC = {
     "pCMC": {"minimize": False, "pkl": "pcmc_model.joblib",  # HIGHER pCMC = LOWER CMC = better; see README
-              "min_value": 0.0089955596692448, "max_value": 6.79588001734408},
+              "min_value": 0.0089955596692448, "max_value": 6.79588001734408,
+              "uncertainty_model_path": _MODELS_PKL, "uncertainty_target": "pCMC",
+              "uncertainty_min_value": 0.0476, "uncertainty_max_value": 0.6120,
+              "lambda_weight": 0.5},
     "SurfTen": {"minimize": True, "pkl": "final_model_surface_tension_avg.joblib",
-                 "min_value": 173.98984, "max_value": 594.85364},
-    "pCMC_Uncertainty": {"minimize": True,
-                          "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
-                          "target": "pCMC", "min_value": 0.0476, "max_value": 0.6120},
-    "SurfTen_Uncertainty": {"minimize": True,
-                             "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
-                             "target": "surface_tension_avg", "min_value": 2.806, "max_value": 18.979},
+                 "min_value": 173.98984, "max_value": 594.85364,
+                 "uncertainty_model_path": _MODELS_PKL, "uncertainty_target": "surface_tension_avg",
+                 "uncertainty_min_value": 2.806, "uncertainty_max_value": 18.979,
+                 "lambda_weight": 0.5},
     "ZincPlausibility": {"minimize": False,
                           "reference_path": "data/zinc_reference_profile.json.gz",
                           "min_value": 0.0, "max_value": 1.0},
 }
-WEIGHT_WITH_ZINC = 0.2
+WEIGHT_WITH_ZINC = 1 / 3
 
 SCORING_FUNCTIONS_NO_ZINC = {
     k: v for k, v in SCORING_FUNCTIONS_WITH_ZINC.items() if k != "ZincPlausibility"
 }
-WEIGHT_NO_ZINC = 0.25
+WEIGHT_NO_ZINC = 0.5
 
 VARIANTS = {
     "with_zinc": (SCORING_FUNCTIONS_WITH_ZINC, WEIGHT_WITH_ZINC),
