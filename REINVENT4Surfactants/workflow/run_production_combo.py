@@ -249,7 +249,11 @@ def main():
             result = evaluate(gen_df, "SMILES", resources, intdiv_sample=args.intdiv_sample)
             with open(eval_path, "w") as f:
                 json.dump(result, f, indent=2)
-            cleanup_run_dir(rep_dir)
+
+        # Always clean up, whether this replicate was just scored or resumed from
+        # cache -- the cached branch used to skip this, leaving stale checkpoints
+        # behind whenever a job restarted after a replicate had already finished.
+        cleanup_run_dir(rep_dir)
 
         mean_score = float(gen_df["Score"].mean())
         result["replicate"] = i
