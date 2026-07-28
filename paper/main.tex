@@ -1,0 +1,217 @@
+\documentclass[11pt]{aime}
+\usepackage{lmodern}
+
+% ─────────────────────────────────────────────────────────────────────
+% Metadata
+% ─────────────────────────────────────────────────────────────────────
+
+\author[1]{Richard Beckmann}
+\author[1]{Hannes Öhman}
+\author[1]{Pablo Martínez Crespo}
+\author[3]{Robert S. Jordan}
+\author[4]{Marisa Gliege}
+\author[5]{Santiago Miret}
+\author[6]{Vijay Kris Narasimhan}
+\author[1,2]{Rocío Mercado}
+\affiliation[1]{AI Laboratory for Molecular Engineering (AIME), Department of Computer Science and Engineering, Chalmers University of Technology \& University of Gothenburg, Gothenburg, Sweden}
+\affiliation[2]{Science for Life Laboratory (SciLifeLab), Gothenburg, Sweden}
+\affiliation[3]{Technology Research, Intel Corporation}
+\affiliation[4]{Chief Technology Office, EMD Electronics}
+\affiliation[5]{Lila Sciences}
+\affiliation[6]{Merck KGaA, Darmstadt, Germany}
+
+% Working title -- revisit once Results/Discussion are drafted.
+\title{Uncertainty- and Plausibility-Aware Reinforcement Learning for De Novo Surfactant Design}
+
+\contribution[*]{Corresponding author}  % Generally Rocío
+
+\correspondence{\email{rocio.mercado@chalmers.se}}
+\codeavailability{\url{https://github.com/hannesohman/REINVENT4Surfactants}}
+\date{\today}
+
+\abstract{%
+% TODO: draft after Results/Discussion are written.
+}
+
+\begin{document}
+\maketitle
+
+% =====================================================================
+% INTRODUCTION
+% =====================================================================
+\section{Introduction}
+\label{sec:introduction}
+
+% TODO: write after Methods/Results/Discussion are drafted.
+
+% =====================================================================
+% METHODS
+% =====================================================================
+\section{Methods}
+\label{sec:methods}
+
+\subsection{Generative framework}
+\label{sec:methods:generative}
+
+\paragraph{Prior model and transfer learning.}
+Molecule generation is performed with REINVENT4\cite{loeffler_reinvent_2024}, using its recurrent neural network prior pretrained on a large subset of PubChem.
+Before reinforcement learning (RL), the prior is fine-tuned via transfer learning (TL) on real surfactant SMILES from the SurfPro-MD dataset (Section~\ref{sec:methods:holdout}), using SMILES randomisation and canonicalisation, per-epoch shuffling, and a decaying learning-rate schedule ($\mathrm{lr}_0=10^{-4}$, decaying to a minimum of $10^{-7}$).
+Critically, TL is performed only on the trainval partition of the dataset, excluding the held-out molecules described in Section~\ref{sec:methods:holdout}, so that any subsequent exact rediscovery of a held-out molecule reflects genuine generalisation rather than memorisation during fine-tuning.
+
+\paragraph{Reinforcement learning.}
+RL proceeds via REINVENT4's staged-learning mode with the Diversity Augmented Policy (DAP) reward strategy.
+At each step, a batch of SMILES is sampled from the agent, scored by the multi-parameter objective described in Sections~\ref{sec:methods:scoring}--\ref{sec:methods:uncertainty}, and used to update the agent via
+\begin{equation}
+    \mathcal{L}_j = \left(\mathrm{NLL}_\mathrm{prior}(x_j) + \sigma \cdot s(x_j) - \mathrm{NLL}_\mathrm{agent}(x_j)\right)^2,
+    \label{eq:dap-loss}
+\end{equation}
+where $s(x_j)$ is the composite score for molecule $x_j$, $\sigma$ is a scaling hyperparameter controlling how strongly the score influences the augmented likelihood, and $\mathrm{NLL}_\mathrm{prior}$/$\mathrm{NLL}_\mathrm{agent}$ are the negative log-likelihoods under the (fixed) TL checkpoint and the (updating) agent, respectively.
+The per-sample losses are averaged and backpropagated via Adam.
+$\sigma$, the learning rate, and the batch size are treated as hyperparameters and optimised per experimental condition (Section~\ref{sec:methods:hpo}).
+
+\subsection{Surrogate scoring functions}
+\label{sec:methods:scoring}
+
+\paragraph{Point-estimate property models.}
+Two physicochemical properties form the core of the scoring objective: the critical micelle concentration, expressed as pCMC $= -\log_{10}(\mathrm{CMC})$, and the MD-derived air--water interfacial surface tension (SurfTen).
+Point estimates for both are obtained from single XGBoost regressors\cite{chen_xgboost_2016} trained on 50 RDKit\cite{landrum2006rdkit} molecular descriptors, taken from the SurfKit surrogate model suite built on the SurfPro-MD dataset (Section~\ref{sec:methods:holdout}).
+
+\paragraph{Property score transformation and direction convention.}
+Because pCMC is defined as $-\log_{10}(\mathrm{CMC})$, a \emph{higher} pCMC corresponds to a \emph{lower} CMC, i.e. a more efficient surfactant that forms micelles at lower concentration.
+This was confirmed empirically against the training data: dodecyl sulfate (sodium dodecyl sulfate, SDS) has pCMC $=2.03$ in SurfPro-MD, implying $\mathrm{CMC}=10^{-2.03}\approx9.3$\,mM, matching SDS's well-established experimental CMC.
+pCMC is therefore maximised, while SurfTen is minimised.
+Each raw prediction $\hat{y}$ is normalised against calibration bounds $[y_\mathrm{min}, y_\mathrm{max}]$ (the 5th/95th percentile of the property over the SurfPro-MD training distribution),
+\begin{equation}
+    s(\hat{y}) =
+    \begin{cases}
+        \dfrac{\hat{y}-y_\mathrm{min}}{y_\mathrm{max}-y_\mathrm{min}}, & \text{property maximised (pCMC)}\\[1.2ex]
+        1-\dfrac{\hat{y}-y_\mathrm{min}}{y_\mathrm{max}-y_\mathrm{min}}, & \text{property minimised (SurfTen)}
+    \end{cases}
+    \label{eq:normalize}
+\end{equation}
+clipped to $[0,1]$, so that a higher transformed score always denotes a more desirable value regardless of the underlying property's own optimisation direction.
+Individual component scores are combined via a weighted geometric mean (REINVENT4's multi-parameter optimisation, MPO, scoring type), with weights specified per experimental condition (Section~\ref{sec:methods:design}).
+
+\paragraph{Structural plausibility.}
+An objective built only from pCMC and SurfTen point estimates was found to reward molecules the surrogate models score confidently but that are not plausible surfactants (e.g.\ small organosilicon or perfluorinated fragments), since ensemble disagreement (Section~\ref{sec:methods:uncertainty}) reflects inter-fold variance rather than distance from the training distribution.
+To discourage this, a structural plausibility term (ZincPlausibility) scores each candidate by the fraction of its BRICS\cite{degen_art_2008} fragments that appear in a reference vocabulary built once from a 200{,}000-molecule uniform random sample of the ZINC20 in-stock (purchasable) chemical space\cite{irwin_zinc20_2020}.
+This deliberately avoids molecule-level nearest-neighbour similarity search against the reference set, which would require $O(\text{batch}\times\text{reference})$ Tanimoto comparisons per RL step; fragment-vocabulary lookup instead costs one BRICS decomposition and a set of dictionary lookups per molecule, independent of reference-set size.
+
+\paragraph{Pareto-based scoring.}
+Two additional scoring components track the empirical (pCMC, SurfTen) Pareto front realised by the agent's own previously generated molecules, added alongside (not replacing) the direct pCMC/SurfTen terms.
+ParetoBoost assigns a fixed bonus to candidates that dominate or extend the current front;
+ParetoGradient instead assigns a continuous score based on the candidate's distance to the nearest segment of the front, so that near-miss candidates are still rewarded proportionally.
+Both recompute the front from the same run's own generated-molecule log at each step, so the reference front evolves together with the policy.
+
+\subsection{Uncertainty-aware scoring: Score Modulation and Loss Modulation}
+\label{sec:methods:uncertainty}
+
+Point-estimate XGBoost regressors carry no native uncertainty estimate.
+Following Medina and Janet\cite{medina_uncertainty_2026}, uncertainty for pCMC and SurfTen is instead obtained from a 25-member XGBoost ensemble (5 outer cross-validation splits $\times$ 5 fold models per property) trained on the same SurfPro-MD data;
+for a given molecule, the standard deviation across the 25 ensemble predictions serves as the uncertainty estimate.
+
+We implement and compare the two uncertainty-incorporation strategies proposed by Medina and Janet\cite{medina_uncertainty_2026}.
+\textbf{Score Modulation (SM)} treats uncertainty as an additional, independent term in the same weighted geometric mean as the property scores,
+\begin{equation}
+    S_\mathrm{SM}(x) = \mathrm{MPO}\!\left(s_1(x), \ldots, s_K(x), s_\mathrm{unc}(x)\right),
+    \label{eq:sm}
+\end{equation}
+where $s_\mathrm{unc}$ is the (normalised, inverted) ensemble standard deviation, so that low disagreement (reliable prediction) scores near 1 and high disagreement scores near 0.
+\textbf{Loss Modulation (LM)} instead leaves the score untouched and reweights each sample's contribution to the RL policy-gradient loss (Eq.~\ref{eq:dap-loss}),
+\begin{equation}
+    \mathcal{L}_\mathrm{LM} = \frac{1}{N}\sum_{j=1}^{N} \frac{w_j}{\overline{w}}\,\mathcal{L}_j,
+    \qquad w_j = \frac{1}{2}\left(s_\mathrm{unc}^{\,\mathrm{pCMC}}(x_j) + s_\mathrm{unc}^{\,\mathrm{SurfTen}}(x_j)\right),
+    \label{eq:lm}
+\end{equation}
+where $\overline{w}$ is the batch mean of $w_j$, so that molecules with lower uncertainty contribute more strongly to the gradient update while the reward signal itself is unaffected.
+Because Eq.~\ref{eq:lm} operates on REINVENT4's training loop rather than the scoring function, LM is implemented as a runtime patch of the reward-computation and policy-update routines, applied only when explicitly enabled; with it disabled, REINVENT4's behaviour is unchanged.
+SM and LM can be enabled independently or jointly from the same underlying scoring configuration (Section~\ref{sec:methods:design}).
+
+\subsection{Holdout construction and transfer-learning exclusion}
+\label{sec:methods:holdout}
+
+\paragraph{SurfPro-MD holdout.}
+From the 1551 curated SurfPro-MD molecules, a composite quality score is computed per molecule as
+\begin{equation}
+    c(x) = \sqrt{s_\mathrm{pCMC}(x)\cdot s_\mathrm{SurfTen}(x)},
+    \label{eq:composite}
+\end{equation}
+using the true measured property values and the same normalisation convention as Eq.~\ref{eq:normalize}.
+The 100 molecules with the highest composite score are held out as the ground-truth SurfPro test set; the remaining 1451 molecules form the transfer-learning trainval set (Section~\ref{sec:methods:generative}).
+
+\paragraph{ZINC holdout.}
+A second, independent holdout is drawn from the ZINC20 in-stock (purchasable) chemical space\cite{irwin_zinc20_2020}: approximately 11.3 million standardised molecules obtained via bulk tranche download, restricted to purchasability classes A/B/C.
+Molecules containing any element absent from the SurfPro-MD training vocabulary (C, Cl, F, N, O, P, S, Si) are excluded.
+The remaining pool is scored with the same surrogate ensemble and ranked by the identical composite score (Eq.~\ref{eq:composite}); the top 100 molecules form the ZINC holdout.
+Because this holdout is ranked purely by surrogate-predicted properties rather than ground truth, it provides a complementary but softer signal than the SurfPro holdout (Section~\ref{sec:methods:evaluation}).
+
+\subsection{Hyperparameter optimisation}
+\label{sec:methods:hpo}
+
+Hyperparameters ($\sigma$, learning rate, batch size) are optimised independently for each experimental condition (Section~\ref{sec:methods:design}) using Optuna\cite{optuna_2019} with its default tree-structured Parzen estimator sampler, maximising the mean composite \texttt{Score} (Eq.~\ref{eq:sm}/the corresponding MPO for that condition) over the top-100 scoring molecules of a short (20-step) trial.
+The search space is $\sigma\in[50,500]$ (log-uniform, integer), learning rate $\in[10^{-5},10^{-3}]$ (log-uniform), and batch size $\in\{64,128,256,512\}$ (categorical).
+Every trial for a given condition starts from the same fixed, already-fine-tuned TL checkpoint, so that only the RL steps themselves are repeated across trials.
+The optimisation objective is deliberately restricted to the RL reward itself: neither the SurfPro nor the ZINC holdout is used to guide hyperparameter selection, since doing so would constitute a form of validation leakage and invalidate any subsequent rediscovery-rate comparison.
+Holdout-based metrics (Section~\ref{sec:methods:evaluation}) are computed only afterward, using the best hyperparameters found.
+
+\subsection{Experimental design: combinatorial evaluation}
+\label{sec:methods:design}
+
+Three scoring-function choices are varied independently: (i) whether the structural plausibility term is included (ZincPlausibility on/off); (ii) the uncertainty-handling mode (none, Score Modulation, Loss Modulation, or both jointly); and (iii) the Pareto-based term added alongside pCMC/SurfTen (none, ParetoBoost, or ParetoGradient).
+This gives $2\times4\times3=24$ combinations in total.
+For a given combination, every scoring component with non-zero weight in Eq.~\ref{eq:sm} is weighted equally, $w_i=1/n_\mathrm{active}$; when Loss Modulation is enabled without Score Modulation, the underlying uncertainty components are still computed (so that Eq.~\ref{eq:lm} can read their scores) but are assigned weight zero in the geometric mean.
+For each of the 24 combinations, the hyperparameter search of Section~\ref{sec:methods:hpo} is run for 15 trials, followed by 5 independent production replicates (20 RL steps each, distinct random seeds) using the best hyperparameters found, all initialised from the same shared TL checkpoint.
+
+\subsection{Evaluation metrics}
+\label{sec:methods:evaluation}
+
+All metrics are computed on the pooled set of unique, RDKit-canonicalised SMILES across the 5 production replicates of a given combination (and, where noted, per replicate to obtain a mean and standard deviation).
+
+\begin{itemize}
+    \item \textbf{Validity}: the fraction of generated SMILES strings that RDKit can parse.
+    \item \textbf{Uniqueness} and \textbf{novelty}: the fraction of valid molecules that are canonically distinct, and the fraction of unique molecules absent from the transfer-learning trainval set, respectively.
+    \item \textbf{Internal diversity}: $1$ minus the mean pairwise Tanimoto similarity (Morgan fingerprints, radius 2, 2048 bits) over a 2000-molecule subsample of the unique, valid set.
+    \item \textbf{Renormalised score}: $\sqrt{s_\mathrm{pCMC}(x)\cdot s_\mathrm{SurfTen}(x)}$ (Eq.~\ref{eq:composite}), computed from the pCMC/SurfTen component scores that REINVENT4 reports for every molecule regardless of which other terms a given combination's objective includes.
+    Because pCMC and SurfTen are scored identically across all 24 combinations, this provides a common basis for comparison that is isolated from the effect of the plausibility, uncertainty, and Pareto terms under study.
+    \item \textbf{Nearest-neighbour similarity to the training set}: for each generated molecule, the Tanimoto similarity (Morgan fingerprints) to its single closest match in the SurfPro-MD trainval set, averaged over all generated molecules.
+    \item \textbf{SurfPro and ZINC top-100 rediscovery rate}: the fraction of the respective 100-molecule holdout (Section~\ref{sec:methods:holdout}) exactly recovered, by canonical SMILES match, among the unique generated molecules.
+\end{itemize}
+
+% =====================================================================
+% RESULTS
+% =====================================================================
+\section{Results}
+\label{sec:results}
+
+% TODO: populate once the 24-combination production sweep has completed.
+
+% =====================================================================
+% DISCUSSION
+% =====================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+% TODO.
+
+% =====================================================================
+% CONCLUSION
+% =====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+% TODO.
+
+\section*{Acknowledgment}
+% TODO: funding sources, compute resources.
+
+\section*{Data and Software Availability}
+All code is available on GitHub \url{https://github.com/hannesohman/REINVENT4Surfactants}.
+
+% =====================================================================
+% REFERENCES
+% =====================================================================
+
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+\end{document}
