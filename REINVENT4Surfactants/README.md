@@ -1435,3 +1435,60 @@ noise.
 Full per-combination numbers (including per-replicate values and best HPO
 hyperparameters) are in `runs/production/comparison_table.csv` and the
 individual `runs/production/<combo>/final_result.json` files.
+
+### Property-space scatter plots (`workflow/make_pcmc_surften_scatter.py`)
+
+For each combination, per-molecule pCMC/SurfTen predictions are recovered in
+the surrogate models' native units by inverting REINVENT's `[0,1]` score
+normalization with the calibration bounds in `config.json` (linear min-max,
+see `comp_surrogate_XGB.py`), pooled across the 5 replicates, subsampled to
+1500 points for plotting, and a small number (~1%) of exact `(0, 0)`-score
+rows -- scoring-failure artifacts from out-of-distribution structures the
+surrogate pipeline couldn't featurize, not genuinely poor predictions -- are
+dropped. The real SurfPro top-100 holdout is overlaid as ground truth in every
+panel:
+
+![SurfTen vs pCMC, ZINC-similarity on](figures/pcmc_surften_scatter_zinc_on.png)
+
+![SurfTen vs pCMC, ZINC-similarity off](figures/pcmc_surften_scatter_zinc_off.png)
+
+The generated clouds sit systematically above/left of the true top-100
+holdout (worse on one or both axes) in every combination -- consistent with
+the score/rediscovery trade-off above -- but a dense tail reaches into the
+holdout's region in all 24 panels, and the `none`/`gradient` Pareto
+combinations visibly pull the densest part of the cloud closest to the
+holdout stars.
+
+### Full comparison table
+
+| ZINC | Uncertainty | Pareto | Renorm. score | SurfPro top-100 | ZINC top-100 | Novelty | Int. diversity | Validity | NN-Tanimoto (train) |
+|---|---|---|---|---|---|---|---|---|---|
+| off | none | none | 0.456 | 0.314 | 0.188 | 0.923 | 0.760 | 0.990 | 0.772 |
+| off | none | boost | 0.498 | 0.036 | 0.096 | 0.978 | 0.689 | 0.991 | 0.622 |
+| off | none | gradient | 0.437 | 0.336 | 0.184 | 0.913 | 0.768 | 0.994 | 0.774 |
+| off | sm | none | 0.449 | 0.308 | 0.192 | 0.925 | 0.748 | 0.996 | 0.784 |
+| off | sm | boost | 0.478 | 0.140 | 0.126 | 0.934 | 0.704 | 0.992 | 0.792 |
+| off | sm | gradient | 0.452 | 0.134 | 0.196 | 0.953 | 0.725 | 0.998 | 0.752 |
+| off | lm | none | 0.536 | 0.092 | 0.110 | 0.975 | 0.618 | 0.990 | 0.753 |
+| off | lm | boost | 0.487 | 0.056 | 0.126 | 0.975 | 0.654 | 0.988 | 0.702 |
+| off | lm | gradient | 0.533 | 0.124 | 0.126 | 0.968 | 0.604 | 0.990 | 0.794 |
+| off | sm_lm | none | 0.426 | 0.203 | 0.198 | 0.940 | 0.705 | 0.998 | 0.798 |
+| off | sm_lm | boost | 0.423 | 0.098 | 0.144 | 0.933 | 0.716 | 0.994 | 0.782 |
+| off | sm_lm | gradient | 0.439 | 0.198 | 0.190 | 0.944 | 0.703 | 0.997 | 0.782 |
+| on | none | none | **0.513** | 0.174 | 0.152 | 0.958 | 0.669 | 0.990 | 0.767 |
+| on | none | boost | 0.501 | 0.092 | 0.138 | 0.968 | 0.677 | 0.995 | 0.710 |
+| on | none | gradient | 0.501 | 0.108 | 0.104 | 0.953 | 0.677 | 0.993 | 0.768 |
+| on | sm | none | 0.460 | 0.203 | 0.170 | 0.950 | 0.691 | 0.994 | 0.780 |
+| on | sm | boost | 0.468 | 0.130 | 0.172 | 0.955 | 0.693 | 0.997 | 0.763 |
+| on | sm | gradient | 0.448 | 0.212 | 0.205 | 0.937 | 0.712 | 0.999 | 0.786 |
+| on | lm | none | 0.493 | 0.220 | 0.166 | 0.950 | 0.666 | 0.996 | 0.791 |
+| on | lm | boost | 0.481 | 0.174 | 0.182 | 0.957 | 0.679 | 0.995 | 0.771 |
+| on | lm | gradient | 0.492 | 0.158 | 0.146 | 0.958 | 0.630 | 0.992 | 0.800 |
+| on | sm_lm | none | 0.379 | **0.362** | **0.222** | 0.883 | **0.769** | 0.998 | 0.778 |
+| on | sm_lm | boost | 0.380 | 0.256 | 0.204 | 0.914 | 0.749 | 0.998 | 0.781 |
+| on | sm_lm | gradient | 0.440 | 0.080 | 0.128 | 0.966 | 0.662 | 0.991 | 0.750 |
+
+Bold marks the best value per column among the top few candidates discussed
+above (highest renormalized score: ZINC on/none/none; highest SurfPro/ZINC
+rediscovery and internal diversity: ZINC on/SM+LM/none). Generated fresh from
+`runs/production/comparison_table.csv` via `df.to_markdown()`.

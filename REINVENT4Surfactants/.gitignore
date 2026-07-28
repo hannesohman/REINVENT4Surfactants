@@ -5,3 +5,8 @@ runs/*
 
 # Raw bulk ZINC download (~1.2GB, reproducible via README's "ZINC in-stock pull" step)
 data/ZINC/
+
+# Local-only visualization outputs (README documents these as not published anywhere)
+/pCMC_vs_SurfTen_current_state.png
+/pcmc_surften_scatter.png
+/top10_grid.png
