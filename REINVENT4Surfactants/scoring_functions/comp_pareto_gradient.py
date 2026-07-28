@@ -313,12 +313,33 @@ class ParetoGradient:
 
         pareto_df = find_pareto_front(previous_df)
 
+        if len(pareto_df) < 3:
+            # find_closest_point_on_line needs at least 3 Pareto points to
+            # define line segments (left/middle/right edge cases) -- with few
+            # RL steps/small batches the front can still be this sparse.
+            # Falls back the same way as "no previous data yet" (2026-07-27,
+            # first hit while smoke-testing this never-before-used component).
+            print(
+                f"[ParetoGradient] Pareto front has only {len(pareto_df)} point(s), "
+                f"need >=3; returning max score of {self.max_score} for all molecules."
+            )
+            score = np.full(len(smiles), self.max_score)
+            return ComponentResults([score])
 
         surften_predictions = run_prediction(smiles, self.SurfTen_model_path)
         surften_predictions = normalize(surften_predictions, self.SurfTen_min_value, self.SurfTen_max_value)
 
         pcmc_predictions = run_prediction(smiles, self.pCMC_model_path)
         pcmc_predictions = normalize(pcmc_predictions, self.pCMC_min_value, self.pCMC_max_value)
+        # pCMC is maximized (higher pCMC = lower CMC = better; see README), but
+        # the Pareto front below and previous_df's un-inverted values are both
+        # in a "lower = better" frame (matching find_pareto_front's minimize-
+        # both-axes assumption). Invert here so fresh candidates use the same
+        # frame -- confirmed 2026-07-27 this was the one place still missing
+        # the pCMC direction fix; previous_df's own un-inversion needs no
+        # change since REINVENT's reported scores are always "higher=better"
+        # regardless of a property's own minimize setting.
+        pcmc_predictions = 1 - pcmc_predictions
 
         smiles_df = pd.DataFrame({
             "SMILES": smiles,

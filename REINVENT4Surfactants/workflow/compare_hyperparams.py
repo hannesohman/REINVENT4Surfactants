@@ -53,7 +53,7 @@ def run_replicate(config_name, params, replicate_idx, tl_model, prior_file, step
 
     log_path = rep_dir / "rep.log"
     result = subprocess.run(
-        [REINVENT_PYTHON, "-u", "-m", "reinvent", "-l", str(log_path), str(toml_path)],
+        [REINVENT_PYTHON, "-u", "workflow/reinvent_with_lm.py", "-l", str(log_path), str(toml_path)],
         capture_output=True, text=True,
     )
     if result.returncode != 0:

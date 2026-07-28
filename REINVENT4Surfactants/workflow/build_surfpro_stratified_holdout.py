@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Build a quality-stratified SurfPro-MD train/holdout split (26 molecules per
-quintile tier => 130 holdout, 1421 trainval), ranked by a composite of real
-measured pCMC and SurfTen.
+Build a SurfPro-MD train/holdout split, ranked by a composite of real
+measured pCMC and SurfTen. Two modes:
+
+  --mode stratified (default): 26 molecules per quintile tier => 130 holdout,
+      1421 trainval (the original design, used for the tier-discrimination
+      analysis in the README's Findings).
+  --mode top_n: flat top-N holdout (highest composite score), rest trainval
+      (used for the 2026-07-27 production runs' simpler top-100 holdout).
 
 pCMC is -log10(CMC in mol/L) (pH-style; confirmed empirically 2026-07-21 --
 e.g. dodecyl sulfate/SDS has pCMC=2.03 in SurfPro-MD.csv, implying
@@ -17,7 +22,10 @@ Usage:
         --input data/surfpro_expanded.csv \
         --holdout-out data/surfpro_real_holdout_test_split.csv \
         --trainval-out data/surfpro_expanded_trainval_only.csv \
-        --n-per-tier 26 --seed 42
+        --mode stratified --n-per-tier 26 --seed 42
+
+    python workflow/build_surfpro_stratified_holdout.py \
+        --mode top_n --top-n 100
 """
 import argparse
 
@@ -33,18 +41,7 @@ def norm_low_is_good(x, lo, hi):
     return 1 - np.clip((x - lo) / (hi - lo), 0, 1)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="data/surfpro_expanded.csv")
-    ap.add_argument("--holdout-out", default="data/surfpro_real_holdout_test_split.csv")
-    ap.add_argument("--trainval-out", default="data/surfpro_expanded_trainval_only.csv")
-    ap.add_argument("--n-per-tier", type=int, default=26)
-    ap.add_argument("--seed", type=int, default=42)
-    args = ap.parse_args()
-
-    df = pd.read_csv(args.input)
-    print(f"loaded {len(df)} molecules from {args.input}", flush=True)
-
+def compute_composite(df: pd.DataFrame) -> pd.Series:
     p5_pcmc, p95_pcmc = df["pCMC"].quantile([0.05, 0.95])
     p5_st, p95_st = df["SurfTen"].quantile([0.05, 0.95])
     print(f"pCMC p5/p95: {p5_pcmc:.4f} / {p95_pcmc:.4f}", flush=True)
@@ -52,27 +49,58 @@ def main():
 
     s_pcmc = norm_high_is_good(df["pCMC"], p5_pcmc, p95_pcmc)   # HIGH pCMC = good (low CMC)
     s_surften = norm_low_is_good(df["SurfTen"], p5_st, p95_st)  # LOW SurfTen = good
-    df["true_composite"] = (s_pcmc * s_surften) ** 0.5
+    return (s_pcmc * s_surften) ** 0.5
 
-    df["quality_tier"] = pd.qcut(
-        df["true_composite"].rank(ascending=False, method="first"), 5, labels=[1, 2, 3, 4, 5]
-    )
-    print(df.groupby("quality_tier", observed=True).size(), flush=True)
 
-    rng = np.random.RandomState(args.seed)
-    holdout_parts = []
-    for tier in [1, 2, 3, 4, 5]:
-        tier_df = df[df["quality_tier"] == tier]
-        idx = rng.choice(tier_df.index, size=args.n_per_tier, replace=False)
-        holdout_parts.append(df.loc[idx])
-    holdout = pd.concat(holdout_parts).sort_index()
-    trainval = df.drop(holdout.index)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input", default="data/surfpro_expanded.csv")
+    ap.add_argument("--holdout-out", default="data/surfpro_real_holdout_test_split.csv")
+    ap.add_argument("--trainval-out", default="data/surfpro_expanded_trainval_only.csv")
+    ap.add_argument("--mode", choices=["stratified", "top_n"], default="stratified")
+    ap.add_argument("--n-per-tier", type=int, default=26, help="stratified mode only")
+    ap.add_argument("--top-n", type=int, default=100, help="top_n mode only")
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
 
-    holdout.to_csv(args.holdout_out, index=False)
-    trainval.to_csv(args.trainval_out, index=False)
-    print(f"holdout: {len(holdout)} -> {args.holdout_out}", flush=True)
-    print(f"trainval: {len(trainval)} -> {args.trainval_out}", flush=True)
-    print(holdout["quality_tier"].value_counts().sort_index(), flush=True)
+    df = pd.read_csv(args.input)
+    print(f"loaded {len(df)} molecules from {args.input}", flush=True)
+
+    df["true_composite"] = compute_composite(df)
+
+    if args.mode == "stratified":
+        df["quality_tier"] = pd.qcut(
+            df["true_composite"].rank(ascending=False, method="first"), 5, labels=[1, 2, 3, 4, 5]
+        )
+        print(df.groupby("quality_tier", observed=True).size(), flush=True)
+
+        rng = np.random.RandomState(args.seed)
+        holdout_parts = []
+        for tier in [1, 2, 3, 4, 5]:
+            tier_df = df[df["quality_tier"] == tier]
+            idx = rng.choice(tier_df.index, size=args.n_per_tier, replace=False)
+            holdout_parts.append(df.loc[idx])
+        holdout = pd.concat(holdout_parts).sort_index()
+        trainval = df.drop(holdout.index)
+
+        holdout.to_csv(args.holdout_out, index=False)
+        trainval.to_csv(args.trainval_out, index=False)
+        print(f"holdout: {len(holdout)} -> {args.holdout_out}", flush=True)
+        print(f"trainval: {len(trainval)} -> {args.trainval_out}", flush=True)
+        print(holdout["quality_tier"].value_counts().sort_index(), flush=True)
+    else:
+        df = df.sort_values("true_composite", ascending=False).reset_index(drop=True)
+        holdout = df.head(args.top_n).copy()
+        trainval = df.iloc[args.top_n:].copy()
+
+        holdout.to_csv(args.holdout_out, index=False)
+        trainval.to_csv(args.trainval_out, index=False)
+        print(f"holdout (top {args.top_n}): {len(holdout)} -> {args.holdout_out}", flush=True)
+        print(f"trainval: {len(trainval)} -> {args.trainval_out}", flush=True)
+        print(
+            f"holdout composite range: {holdout['true_composite'].min():.4f} - "
+            f"{holdout['true_composite'].max():.4f}", flush=True,
+        )
 
 
 if __name__ == "__main__":

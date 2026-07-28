@@ -40,39 +40,30 @@ CONFIGS = {
 }
 
 # Two objective variants to isolate the effect of ZincPlausibility itself:
-#  - "with_zinc": current config.json default -- pCMC/SurfTen (each with UWO
-#    uncertainty baked in, see below) + ZincPlausibility, 1/3 weight each.
-#  - "no_zinc": pCMC/SurfTen only (UWO uncertainty still applied per-property),
-#    0.5 weight each -- isolates ZincPlausibility's effect from uncertainty
-#    handling, which is otherwise identical between the two variants.
-#
-# Uncertainty is combined via UWO (Coste et al. 2024, ICLR): combined =
-# point_score - lambda_weight * uncertainty_score, inside a single
-# UncertaintyWeightedScore component per property -- replaces the old separate
-# pCMC_Uncertainty/SurfTen_Uncertainty geometric-mean terms (2026-07-22).
-_MODELS_PKL = "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl"
-
+#  - "with_zinc": current config.json default -- 5-term, 0.2 weight each.
+#  - "no_zinc": the original (pre-2026-07-21) 4-term uncertainty-aware
+#    objective -- pCMC/SurfTen/pCMC_Uncertainty/SurfTen_Uncertainty, 0.25 each.
 SCORING_FUNCTIONS_WITH_ZINC = {
     "pCMC": {"minimize": False, "pkl": "pcmc_model.joblib",  # HIGHER pCMC = LOWER CMC = better; see README
-              "min_value": 0.0089955596692448, "max_value": 6.79588001734408,
-              "uncertainty_model_path": _MODELS_PKL, "uncertainty_target": "pCMC",
-              "uncertainty_min_value": 0.0476, "uncertainty_max_value": 0.6120,
-              "lambda_weight": 0.5},
+              "min_value": 0.0089955596692448, "max_value": 6.79588001734408},
     "SurfTen": {"minimize": True, "pkl": "final_model_surface_tension_avg.joblib",
-                 "min_value": 173.98984, "max_value": 594.85364,
-                 "uncertainty_model_path": _MODELS_PKL, "uncertainty_target": "surface_tension_avg",
-                 "uncertainty_min_value": 2.806, "uncertainty_max_value": 18.979,
-                 "lambda_weight": 0.5},
+                 "min_value": 173.98984, "max_value": 594.85364},
+    "pCMC_Uncertainty": {"minimize": True,
+                          "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+                          "target": "pCMC", "min_value": 0.0476, "max_value": 0.6120},
+    "SurfTen_Uncertainty": {"minimize": True,
+                             "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+                             "target": "surface_tension_avg", "min_value": 2.806, "max_value": 18.979},
     "ZincPlausibility": {"minimize": False,
                           "reference_path": "data/zinc_reference_profile.json.gz",
                           "min_value": 0.0, "max_value": 1.0},
 }
-WEIGHT_WITH_ZINC = 1 / 3
+WEIGHT_WITH_ZINC = 0.2
 
 SCORING_FUNCTIONS_NO_ZINC = {
     k: v for k, v in SCORING_FUNCTIONS_WITH_ZINC.items() if k != "ZincPlausibility"
 }
-WEIGHT_NO_ZINC = 0.5
+WEIGHT_NO_ZINC = 0.25
 
 VARIANTS = {
     "with_zinc": (SCORING_FUNCTIONS_WITH_ZINC, WEIGHT_WITH_ZINC),
@@ -122,30 +113,42 @@ def run_config(config_name, params, args, resources, scoring_functions, weight):
         result["replicate"] = i
         result["mean_score"] = mean_score
         per_rep_results.append(result)
-        print(
-            f"  replicate {i}: ok  mean_score={mean_score:.4f}  validity={result['validity']:.3f}  "
-            f"surfpro_top2={result['surfpro_top2_vs_bottom2']['top2']['rate']:.3f}  "
-            f"surfpro_bottom2={result['surfpro_top2_vs_bottom2']['bottom2']['rate']:.3f}",
-            flush=True,
-        )
+
+        status_bits = [f"mean_score={mean_score:.4f}", f"validity={result['validity']:.3f}"]
+        if result.get("surfpro_top2_vs_bottom2"):
+            status_bits.append(f"surfpro_top2={result['surfpro_top2_vs_bottom2']['top2']['rate']:.3f}")
+            status_bits.append(f"surfpro_bottom2={result['surfpro_top2_vs_bottom2']['bottom2']['rate']:.3f}")
+        if result.get("surfpro_top100"):
+            status_bits.append(f"surfpro_top100={result['surfpro_top100']['rate']:.3f}")
+        if result.get("zinc_top100"):
+            status_bits.append(f"zinc_top100={result['zinc_top100']['rate']:.6f}")
+        print(f"  replicate {i}: ok  " + "  ".join(status_bits), flush=True)
 
     if not per_rep_results:
         print(f"  ALL replicates failed for {config_name}!", file=sys.stderr)
         return None, None
 
     agg = {m: mean_std([r[m] for r in per_rep_results]) for m in SCALAR_METRICS}
-    tiers = sorted(per_rep_results[0]["surfpro_tier_hits"].keys(), key=int)
-    agg["surfpro_tier_hits"] = {
-        t: mean_std([r["surfpro_tier_hits"][t]["rate"] for r in per_rep_results]) for t in tiers
-    }
-    agg["surfpro_top2_vs_bottom2"] = {
-        "top2": mean_std([r["surfpro_top2_vs_bottom2"]["top2"]["rate"] for r in per_rep_results]),
-        "bottom2": mean_std([r["surfpro_top2_vs_bottom2"]["bottom2"]["rate"] for r in per_rep_results]),
-    }
-    zinc_tiers = sorted(per_rep_results[0]["zinc_tier_hits"].keys(), key=int)
-    agg["zinc_tier_hits"] = {
-        t: mean_std([r["zinc_tier_hits"][t]["rate"] for r in per_rep_results]) for t in zinc_tiers
-    }
+
+    if per_rep_results[0].get("surfpro_tier_hits"):
+        tiers = sorted(per_rep_results[0]["surfpro_tier_hits"].keys(), key=int)
+        agg["surfpro_tier_hits"] = {
+            t: mean_std([r["surfpro_tier_hits"][t]["rate"] for r in per_rep_results]) for t in tiers
+        }
+    if per_rep_results[0].get("surfpro_top2_vs_bottom2"):
+        agg["surfpro_top2_vs_bottom2"] = {
+            "top2": mean_std([r["surfpro_top2_vs_bottom2"]["top2"]["rate"] for r in per_rep_results]),
+            "bottom2": mean_std([r["surfpro_top2_vs_bottom2"]["bottom2"]["rate"] for r in per_rep_results]),
+        }
+    if per_rep_results[0].get("zinc_tier_hits"):
+        zinc_tiers = sorted(per_rep_results[0]["zinc_tier_hits"].keys(), key=int)
+        agg["zinc_tier_hits"] = {
+            t: mean_std([r["zinc_tier_hits"][t]["rate"] for r in per_rep_results]) for t in zinc_tiers
+        }
+    if per_rep_results[0].get("surfpro_top100"):
+        agg["surfpro_top100"] = mean_std([r["surfpro_top100"]["rate"] for r in per_rep_results])
+    if per_rep_results[0].get("zinc_top100"):
+        agg["zinc_top100"] = mean_std([r["zinc_top100"]["rate"] for r in per_rep_results])
 
     # Pooled (all replicates' unique molecules combined) result, for
     # comparability with earlier pooled-3-replicate Findings tables.
@@ -166,8 +169,9 @@ def main():
     ap.add_argument("--train-csv", default="data/surfpro_expanded_trainval_only.csv")
     ap.add_argument("--train-smiles-col", default="SMILES_canonical")
     ap.add_argument("--surfpro-holdout", default="data/surfpro_real_holdout_test_split.csv")
-    ap.add_argument("--zinc-quintile-dir", default="data")
+    ap.add_argument("--zinc-quintile-dir", default=None, help="omit to skip tiered ZINC metrics")
     ap.add_argument("--zinc-reference", default="data/zinc_reference_profile.json.gz")
+    ap.add_argument("--zinc-top100", default="data/zinc_top100_holdout.csv")
     ap.add_argument("--intdiv-sample", type=int, default=2000)
     ap.add_argument("--variant", choices=list(VARIANTS.keys()), default="with_zinc",
                      help="with_zinc: current 5-term objective. no_zinc: original 4-term objective, ZincPlausibility excluded.")
@@ -180,8 +184,10 @@ def main():
 
     print("loading fixed-cost resources once (train profile, ZINC tiers, ZINC reference)...", flush=True)
     resources = load_resources(
-        args.train_csv, args.train_smiles_col, args.surfpro_holdout,
-        args.zinc_quintile_dir, args.zinc_reference,
+        train_csv=args.train_csv, train_smiles_col=args.train_smiles_col,
+        surfpro_holdout=args.surfpro_holdout, zinc_reference=args.zinc_reference,
+        zinc_quintile_dir=args.zinc_quintile_dir,
+        surfpro_top100_csv=args.surfpro_holdout, zinc_top100_csv=args.zinc_top100,
     )
 
     all_results = {}
@@ -199,10 +205,17 @@ def main():
         print(f"\n[{config_name}]  params={res['params']}")
         for m in SCALAR_METRICS:
             print(f"  {m}: {agg[m]['mean']:.4f} +/- {agg[m]['std']:.4f}")
-        print(f"  surfpro top2: {agg['surfpro_top2_vs_bottom2']['top2']['mean']:.4f} +/- {agg['surfpro_top2_vs_bottom2']['top2']['std']:.4f}")
-        print(f"  surfpro bottom2: {agg['surfpro_top2_vs_bottom2']['bottom2']['mean']:.4f} +/- {agg['surfpro_top2_vs_bottom2']['bottom2']['std']:.4f}")
-        print(f"  pooled surfpro top2 rate: {res['pooled']['surfpro_top2_vs_bottom2']['top2']['rate']:.4f}")
-        print(f"  pooled surfpro bottom2 rate: {res['pooled']['surfpro_top2_vs_bottom2']['bottom2']['rate']:.4f}")
+        if "surfpro_top2_vs_bottom2" in agg:
+            print(f"  surfpro top2: {agg['surfpro_top2_vs_bottom2']['top2']['mean']:.4f} +/- {agg['surfpro_top2_vs_bottom2']['top2']['std']:.4f}")
+            print(f"  surfpro bottom2: {agg['surfpro_top2_vs_bottom2']['bottom2']['mean']:.4f} +/- {agg['surfpro_top2_vs_bottom2']['bottom2']['std']:.4f}")
+            print(f"  pooled surfpro top2 rate: {res['pooled']['surfpro_top2_vs_bottom2']['top2']['rate']:.4f}")
+            print(f"  pooled surfpro bottom2 rate: {res['pooled']['surfpro_top2_vs_bottom2']['bottom2']['rate']:.4f}")
+        if "surfpro_top100" in agg:
+            print(f"  surfpro top100: {agg['surfpro_top100']['mean']:.4f} +/- {agg['surfpro_top100']['std']:.4f}")
+            print(f"  pooled surfpro top100 rate: {res['pooled']['surfpro_top100']['rate']:.4f}")
+        if "zinc_top100" in agg:
+            print(f"  zinc top100: {agg['zinc_top100']['mean']:.6f} +/- {agg['zinc_top100']['std']:.6f}")
+            print(f"  pooled zinc top100 rate: {res['pooled']['zinc_top100']['rate']:.6f}")
         print(f"  pooled n_unique_valid: {res['pooled']['n_unique_valid']}")
 
     with open(out_dir / "comparison_full.json", "w") as f:

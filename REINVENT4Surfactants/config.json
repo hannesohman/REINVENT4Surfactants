@@ -25,25 +25,27 @@
     },
     
     "WEIGHT_COMBOS": [
-        [["pCMC", 0.334], ["SurfTen", 0.333], ["ZincPlausibility", 0.333]]
+        [["pCMC", 0.2], ["SurfTen", 0.2], ["pCMC_Uncertainty", 0.2], ["SurfTen_Uncertainty", 0.2], ["ZincPlausibility", 0.2]]
     ],
 
     "SCORING_FUNCTIONS": {
-        "pCMC": {
-            "minimize": false, "pkl": "pcmc_model.joblib",
-            "min_value": 0.0089955596692448, "max_value": 6.79588001734408,
-            "uncertainty_model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
-            "uncertainty_target": "pCMC",
-            "uncertainty_min_value": 0.0476, "uncertainty_max_value": 0.6120,
-            "lambda_weight": 0.5
+        "pCMC": { "minimize": false, "pkl": "pcmc_model.joblib",
+            "min_value": 0.0089955596692448, "max_value": 6.79588001734408
         },
-        "SurfTen": {
-            "minimize": true, "pkl": "final_model_surface_tension_avg.joblib",
-            "min_value": 173.98984, "max_value": 594.85364,
-            "uncertainty_model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
-            "uncertainty_target": "surface_tension_avg",
-            "uncertainty_min_value": 2.806, "uncertainty_max_value": 18.979,
-            "lambda_weight": 0.5
+        "SurfTen": { "minimize": true, "pkl": "final_model_surface_tension_avg.joblib",
+            "min_value": 173.98984, "max_value": 594.85364
+        },
+        "pCMC_Uncertainty": {
+            "minimize": true,
+            "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+            "target": "pCMC",
+            "min_value": 0.0476, "max_value": 0.6120
+        },
+        "SurfTen_Uncertainty": {
+            "minimize": true,
+            "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+            "target": "surface_tension_avg",
+            "min_value": 2.806, "max_value": 18.979
         },
         "ZincPlausibility": {
             "minimize": false,

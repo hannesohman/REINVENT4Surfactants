@@ -2,3 +2,6 @@ venv
 __pycache__
 
 runs/*
+
+# Raw bulk ZINC download (~1.2GB, reproducible via README's "ZINC in-stock pull" step)
+data/ZINC/

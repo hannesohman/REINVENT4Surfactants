@@ -103,40 +103,74 @@ def tier_aggregate(tier_hits: dict, tiers: list[int]) -> tuple[int, int]:
     return hits, n
 
 
+def nn_tanimoto_similarity(mols, ref_fps: list) -> float:
+    """Mean nearest-neighbor Tanimoto similarity of `mols` to a reference
+    fingerprint set (e.g. the SurfPro training set) -- standard MOSES/
+    GuacaMol-style "similarity to reference" metric: for each query molecule,
+    take its single closest reference match, then average across queries."""
+    if not mols or not ref_fps:
+        return float("nan")
+    sims = []
+    for mol in mols:
+        fp = morgan_fp(mol)
+        s = DataStructs.BulkTanimotoSimilarity(fp, ref_fps)
+        sims.append(max(s) if s else 0.0)
+    return float(np.mean(sims))
+
+
 @dataclass
 class EvalResources:
     """Fixed-cost inputs, loaded once and reused across many evaluate() calls."""
     train_canon_set: set
     train_frag: Counter
     train_scaf: Counter
+    train_fps: list
     surfpro_df: pd.DataFrame
-    zinc_tier_sets: dict  # tier(int) -> set(smiles_std)
+    zinc_tier_sets: dict  # tier(int) -> set(smiles_std); {} if not requested
     zinc_frag: Counter
     zinc_scaf: Counter
+    surfpro_top100_set: set = None  # canonical SMILES, or None if not requested
+    zinc_top100_set: set = None
 
 
-def load_resources(train_csv, train_smiles_col, surfpro_holdout, zinc_quintile_dir, zinc_reference) -> EvalResources:
+def load_resources(
+    train_csv, train_smiles_col, surfpro_holdout, zinc_reference,
+    zinc_quintile_dir=None, surfpro_top100_csv=None, zinc_top100_csv=None,
+) -> EvalResources:
     train_df = pd.read_csv(train_csv)
     train_canon_set = set(train_df[train_smiles_col].apply(canon).dropna())
     train_mols = [m for m in (Chem.MolFromSmiles(s) for s in train_canon_set) if m is not None]
     train_frag, train_scaf = fragment_and_scaffold_counts(train_mols)
+    train_fps = [morgan_fp(m) for m in train_mols]
 
     surfpro_df = pd.read_csv(surfpro_holdout)
     surfpro_df["canon"] = surfpro_df["SMILES_canonical"].apply(canon)
 
     zinc_tier_sets = {}
-    for tier in [1, 2, 3, 4, 5]:
-        path = f"{zinc_quintile_dir}/zinc_quintile_tier{tier}.smi.gz"
-        with gzip.open(path, "rt") as f:
-            zinc_tier_sets[tier] = set(line.strip() for line in f)
+    if zinc_quintile_dir:
+        for tier in [1, 2, 3, 4, 5]:
+            path = f"{zinc_quintile_dir}/zinc_quintile_tier{tier}.smi.gz"
+            with gzip.open(path, "rt") as f:
+                zinc_tier_sets[tier] = set(line.strip() for line in f)
 
     with gzip.open(zinc_reference, "rt") as f:
         zinc_ref = json.load(f)
     zinc_frag, zinc_scaf = Counter(zinc_ref["fragment_counts"]), Counter(zinc_ref["scaffold_counts"])
 
+    surfpro_top100_set = None
+    if surfpro_top100_csv:
+        top100_df = pd.read_csv(surfpro_top100_csv)
+        surfpro_top100_set = set(top100_df["SMILES_canonical"].apply(canon).dropna())
+
+    zinc_top100_set = None
+    if zinc_top100_csv:
+        top100_df = pd.read_csv(zinc_top100_csv)
+        zinc_top100_set = set(top100_df["smiles_std"].apply(canon).dropna())
+
     return EvalResources(
-        train_canon_set=train_canon_set, train_frag=train_frag, train_scaf=train_scaf,
+        train_canon_set=train_canon_set, train_frag=train_frag, train_scaf=train_scaf, train_fps=train_fps,
         surfpro_df=surfpro_df, zinc_tier_sets=zinc_tier_sets,
+        surfpro_top100_set=surfpro_top100_set, zinc_top100_set=zinc_top100_set,
         zinc_frag=zinc_frag, zinc_scaf=zinc_scaf,
     )
 
@@ -167,18 +201,56 @@ def evaluate(raw_df: pd.DataFrame, generated_smiles_col: str, resources: EvalRes
 
     unique_set = set(unique_canon)
     surfpro = resources.surfpro_df
+
     surfpro_tier_hits = {}
-    for tier in sorted(surfpro["quality_tier"].unique()):
-        tier_df = surfpro[surfpro["quality_tier"] == tier]
-        hits = int(tier_df["canon"].isin(unique_set).sum())
-        surfpro_tier_hits[int(tier)] = {"hits": hits, "n": len(tier_df), "rate": hits / len(tier_df)}
-    top2_hits, top2_n = tier_aggregate(surfpro_tier_hits, [1, 2])
-    bot2_hits, bot2_n = tier_aggregate(surfpro_tier_hits, [4, 5])
+    surfpro_top2_vs_bottom2 = None
+    if "quality_tier" in surfpro.columns:
+        for tier in sorted(surfpro["quality_tier"].unique()):
+            tier_df = surfpro[surfpro["quality_tier"] == tier]
+            hits = int(tier_df["canon"].isin(unique_set).sum())
+            surfpro_tier_hits[int(tier)] = {"hits": hits, "n": len(tier_df), "rate": hits / len(tier_df)}
+        top2_hits, top2_n = tier_aggregate(surfpro_tier_hits, [1, 2])
+        bot2_hits, bot2_n = tier_aggregate(surfpro_tier_hits, [4, 5])
+        surfpro_top2_vs_bottom2 = {
+            "top2": {"hits": top2_hits, "n": top2_n, "rate": top2_hits / top2_n},
+            "bottom2": {"hits": bot2_hits, "n": bot2_n, "rate": bot2_hits / bot2_n},
+        }
 
     zinc_tier_hits = {}
     for tier, tier_smiles in resources.zinc_tier_sets.items():
         hits = sum(1 for s in unique_canon if s in tier_smiles)
         zinc_tier_hits[tier] = {"hits": hits, "n": len(tier_smiles), "rate": hits / len(tier_smiles) if tier_smiles else 0.0}
+
+    # Flat top-100 rediscovery (2026-07-27 production combos): simpler
+    # hits/n/rate against a flat top-N holdout, independent of the tiered
+    # stratified holdout above.
+    surfpro_top100 = None
+    if resources.surfpro_top100_set is not None:
+        n = len(resources.surfpro_top100_set)
+        hits = len(unique_set & resources.surfpro_top100_set)
+        surfpro_top100 = {"hits": hits, "n": n, "rate": hits / n if n else float("nan")}
+
+    zinc_top100 = None
+    if resources.zinc_top100_set is not None:
+        n = len(resources.zinc_top100_set)
+        hits = len(unique_set & resources.zinc_top100_set)
+        zinc_top100 = {"hits": hits, "n": n, "rate": hits / n if n else float("nan")}
+
+    # Re-normalized score (2026-07-27): geometric mean of ONLY the pCMC/SurfTen
+    # [0,1] component scores REINVENT reports ("(raw)" columns -- already
+    # normalized/inverted, not real units -- see README), ignoring whatever
+    # else (ZincPlausibility, uncertainty, Pareto) was in this combo's own
+    # objective. Comparable across combos with different objectives since
+    # pCMC/SurfTen are always present with the same calibration bounds.
+    renormalized_score = float("nan")
+    if "pCMC (raw)" in raw_df.columns and "SurfTen (raw)" in raw_df.columns:
+        p = raw_df["pCMC (raw)"].to_numpy(dtype=float)
+        s = raw_df["SurfTen (raw)"].to_numpy(dtype=float)
+        valid = np.isfinite(p) & np.isfinite(s)
+        if valid.any():
+            renormalized_score = float(np.sqrt(np.clip(p[valid], 0, None) * np.clip(s[valid], 0, None)).mean())
+
+    nn_tanimoto = nn_tanimoto_similarity(unique_mols, resources.train_fps)
 
     return {
         "n_generated_total": n_total,
@@ -189,16 +261,17 @@ def evaluate(raw_df: pd.DataFrame, generated_smiles_col: str, resources: EvalRes
         "uniqueness": uniqueness,
         "novelty": novelty,
         "internal_diversity": intdiv,
+        "renormalized_score": renormalized_score,
+        "nn_tanimoto_to_train": nn_tanimoto,
         "frag_similarity_train": frag_sim_train,
         "scaf_similarity_train": scaf_sim_train,
         "frag_similarity_zinc": frag_sim_zinc,
         "scaf_similarity_zinc": scaf_sim_zinc,
         "surfpro_tier_hits": surfpro_tier_hits,
-        "surfpro_top2_vs_bottom2": {
-            "top2": {"hits": top2_hits, "n": top2_n, "rate": top2_hits / top2_n},
-            "bottom2": {"hits": bot2_hits, "n": bot2_n, "rate": bot2_hits / bot2_n},
-        },
+        "surfpro_top2_vs_bottom2": surfpro_top2_vs_bottom2,
         "zinc_tier_hits": zinc_tier_hits,
+        "surfpro_top100": surfpro_top100,
+        "zinc_top100": zinc_top100,
     }
 
 
@@ -209,8 +282,10 @@ def main():
     ap.add_argument("--train-csv", required=True)
     ap.add_argument("--train-smiles-col", default="SMILES_canonical")
     ap.add_argument("--surfpro-holdout", required=True)
-    ap.add_argument("--zinc-quintile-dir", default="data")
+    ap.add_argument("--zinc-quintile-dir", default=None, help="omit to skip tiered ZINC metrics")
     ap.add_argument("--zinc-reference", default="data/zinc_reference_profile.json.gz")
+    ap.add_argument("--surfpro-top100", default=None, help="flat top-100 SurfPro holdout CSV, optional")
+    ap.add_argument("--zinc-top100", default=None, help="flat top-100 ZINC holdout CSV, optional")
     ap.add_argument("--intdiv-sample", type=int, default=2000)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -223,8 +298,10 @@ def main():
 
     print("loading fixed-cost resources (train profile, ZINC tiers, ZINC reference)...", flush=True)
     resources = load_resources(
-        args.train_csv, args.train_smiles_col, args.surfpro_holdout,
-        args.zinc_quintile_dir, args.zinc_reference,
+        train_csv=args.train_csv, train_smiles_col=args.train_smiles_col,
+        surfpro_holdout=args.surfpro_holdout, zinc_reference=args.zinc_reference,
+        zinc_quintile_dir=args.zinc_quintile_dir,
+        surfpro_top100_csv=args.surfpro_top100, zinc_top100_csv=args.zinc_top100,
     )
 
     print("evaluating...", flush=True)

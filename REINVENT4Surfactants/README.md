@@ -97,62 +97,87 @@ A typical run with the current default config (100 TL epochs on ~1400 molecules,
 replicate RL runs × 20 steps × batch 256) takes well under an hour end-to-end once
 jobs are scheduled — see `runs/test/` for worked examples.
 
-## Uncertainty-aware scoring (`UncertaintyWeightedScore`)
+## Uncertainty-aware scoring: Score Modulation (`UncertaintyPenalty`) and Loss Modulation (`reinvent_lm_patch.py`)
 
 The surrogate property models in `models/` (pCMC, SurfTen, DMOL, DSOL, Visc) are
 single point-estimate XGBoost regressors and do not carry any native uncertainty
-estimate. Both the current component and its predecessor instead use the
-25-member XGBoost ensemble (5 outer cross-validation splits x 5 fold models each,
-one such ensemble per property) found in
-`surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl` — see that
-project's `surrogate.py` (training) and `predict.py` (reference inference /
-uncertainty implementation) for how it was generated and is meant to be used.
-For a given target property, a molecule is run through every fold model in its
-ensemble and the standard deviation across the 25 predictions is used as the
-uncertainty measure — the Frequentist "deep ensembles" strategy described in
-`test/uncertainty_quantification.txt`.
+estimate. Uncertainty comes from a separate 25-member XGBoost ensemble (5 outer
+cross-validation splits x 5 fold models each, one such ensemble per property)
+found in `surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl` — see
+that project's `surrogate.py` (training) and `predict.py` (reference inference)
+for how it was generated. For a given target property, a molecule is run
+through every fold model in its ensemble and the standard deviation across the
+25 predictions is used as the uncertainty measure — the Frequentist "deep
+ensembles" strategy described in `test/uncertainty_quantification.txt`.
 
-**As of 2026-07-22, uncertainty is combined via Uncertainty-Weighted Optimization
-(UWO)**, following Coste et al. 2024, *"Reward Model Ensembles Help Mitigate
-Overoptimization"* (ICLR 2024): `R_UWO = mean - lambda * Var`, i.e. the
-uncertainty penalty is subtracted directly from a property's own score, inside a
-single component (`scoring_functions/comp_uncertainty_weighted.py`,
-`UncertaintyWeightedScore`), rather than being a separate endpoint combined only
-via the outer geometric mean (the previous "Score Modulation" strategy, still
-available as `scoring_functions/comp_uncertainty.py`'s `UncertaintyPenalty` for
-any endpoint that still wants point-estimate and uncertainty scored
-independently — e.g. DMOL/DSOL/Visc in `ADDON_FUNCTIONS`, unused by the current
-default objective).
+**As of 2026-07-27, this project implements the two strategies from Borja
+Medina's master's thesis, *"Uncertainty-aware reinforcement learning for
+chemical de novo design"*** (the actual reference this project's "Score
+Modulation" terminology was always citing — see Findings below for how a
+different, unrelated paper (Coste et al. 2024, UWO) had briefly replaced this
+between 2026-07-22 and 2026-07-27, and why that was reverted). Both strategies
+keep the uncertainty measure and the property's own score structurally
+separate — neither one subtracts or merges them the way UWO did:
 
-For each property, `UncertaintyWeightedScore`:
-1. Computes the point estimate from the existing single joblib model (e.g.
-   `pcmc_model.joblib`), normalized/inverted into `[0,1]` exactly as the plain
-   `SurrogateModel` component does (higher = better, regardless of the
-   property's own `minimize` direction).
-2. Computes the ensemble std as above, normalized into `[0,1]` against
-   `uncertainty_min_value`/`uncertainty_max_value` (the 5th/95th percentile of
-   ensemble std over the SurfPro-MD training set) — **not** inverted here: 0 =
-   low disagreement/certain, 1 = high disagreement/uncertain.
-3. Returns `clip(point_score - lambda_weight * uncertainty_score, 0, 1)` as a
-   single combined score for that property.
+**Score Modulation (SM)** — `scoring_functions/comp_uncertainty.py`,
+`UncertaintyPenalty` — treats uncertainty as its own, independent endpoint fed
+into the *same* geometric-mean MPO as every other property score:
+`S_SM = MPO(s_1, ..., s_K, s_unc)`. This is exactly the pre-UWO setup: the std
+is normalized with `min_value`/`max_value` and, when `minimize=true`, inverted
+so low ensemble disagreement (reliable) scores near 1 and high disagreement
+(unreliable) scores near 0, weighted in `config.json`'s `WEIGHT_COMBOS` like
+any other endpoint (`pCMC_Uncertainty`, `SurfTen_Uncertainty`, currently 0.2
+each alongside `pCMC`/`SurfTen`/`ZincPlausibility`).
 
-`lambda_weight` defaults to 0.5 for both `pCMC` and `SurfTen` — the paper found
-results fairly robust to its exact value (0.05-1.0 all performed reasonably in
-their setup), so this wasn't tuned further. Params: `model_path`, `min_value`,
-`max_value`, `minimize` (point estimate, same as `SurrogateModel`) plus
-`uncertainty_model_path`, `uncertainty_target`, `uncertainty_min_value`,
-`uncertainty_max_value`, `lambda_weight`.
+**Loss Modulation (LM)** — `workflow/reinvent_lm_patch.py` — does **not**
+touch the score/reward at all. Instead it reweights each generated molecule's
+contribution to the RL policy-gradient loss:
+`L_LM = (1/N) * sum_j [w_j / mean(w)] * L_j`, where `w_j` is the arithmetic
+mean of the same `pCMC_Uncertainty`/`SurfTen_Uncertainty` scores SM already
+computes (already in `[0,1]` with 1=reliable, exactly matching the thesis's
+`w_unc_j = 1 - d_j`). Molecules with lower uncertainty contribute more to the
+gradient update; the `Score` REINVENT reports is completely unaffected.
 
-**Practical effect on `config.json`**: the old 4-endpoint split
-(`pCMC`/`SurfTen`/`pCMC_Uncertainty`/`SurfTen_Uncertainty`) collapses into 2
-endpoints (`pCMC`/`SurfTen`, each with uncertainty baked in), so
-`WEIGHT_COMBOS` is now a 3-way split with `ZincPlausibility`
-(`pCMC`: 0.334, `SurfTen`: 0.333, `ZincPlausibility`: 0.333) instead of the
-previous 5-way 0.2-each split. Verified with a smoke-test `staged_learning` run
-through the actual REINVENT pipeline (not just standalone) before adoption —
-see Findings below for the result and for history: original 2026-07-17 addition
-of uncertainty (4-way, 0.25 each) and the 2026-07-21 addition of
-`ZincPlausibility` (5-way, 0.2 each) that this supersedes.
+This requires patching REINVENT4's actual training loop, not just adding a
+scoring-function plugin: the per-sample loss (`(augmented_ll - agent_ll)^2` in
+`reinvent.runmodes.RL.reward.dap_strategy`) is averaged via a plain `.mean()`
+in `RLReward.__call__`, and the per-component score breakdown needed to build
+`w_j` is available one call frame up, in `ReinventLearning.update`'s
+`results.completed_components`. `reinvent_lm_patch.py` monkeypatches both
+methods at runtime — nothing is installed into reinvent4-env's site-packages,
+unlike the scoring-function components; it only takes effect when explicitly
+imported.
+
+**Running with or without LM, on top of the same SM setup, with nothing
+re-implemented**: `workflow/reinvent_with_lm.py` is a drop-in replacement for
+`python -m reinvent` (every RL invocation in this project uses it) that
+applies the patch only when `REINVENT_LM_ENABLED=1` is set — unset, it behaves
+identically to plain REINVENT. Combined with `WEIGHT_COMBOS`'s
+`pCMC_Uncertainty`/`SurfTen_Uncertainty` weights (SM on/off), this gives four
+independently-controlled combinations from one TOML/scoring setup:
+
+| | LM off | LM on (`REINVENT_LM_ENABLED=1`) |
+|---|---|---|
+| SM off (uncertainty weight = 0) | plain pCMC/SurfTen/ZincPlausibility | LM only |
+| SM on (uncertainty weight > 0, current default) | SM only (current default) | SM & LM |
+
+```bash
+# SM only (current default) -- no env var needed
+python workflow/reinvent_with_lm.py -l run.log run.toml
+
+# SM & LM together
+REINVENT_LM_ENABLED=1 python workflow/reinvent_with_lm.py -l run.log run.toml
+
+# which components combine into the LM weight (default: pCMC_Uncertainty,SurfTen_Uncertainty)
+REINVENT_LM_ENABLED=1 REINVENT_LM_COMPONENTS=pCMC_Uncertainty,SurfTen_Uncertainty \
+    python workflow/reinvent_with_lm.py -l run.log run.toml
+```
+
+Verified with a smoke-test `staged_learning` run through the actual REINVENT
+pipeline in both modes (SM-only regression-checked identical to before the
+patch existed; SM & LM confirmed the patch engages, finds the configured
+components every step, and completes without affecting the reported `Score`)
+before adopting this as the default — see Findings below.
 
 ## Structural plausibility scoring (`ZincPlausibility`)
 
@@ -1174,3 +1199,239 @@ tiers/holdouts and retraining the TL checkpoint again -- a substantial,
 expensive re-run not requested here. This is a known inconsistency between the
 live RL objective and the offline "what counts as a good molecule" ranking
 used to build holdouts; flagging it rather than fixing it blind.
+
+## Findings (2026-07-27): the UWO paper was the wrong reference -- reverted to Score Modulation, added Loss Modulation
+
+The 2026-07-22 switch to Uncertainty-Weighted Optimization (Coste et al. 2024,
+an RLHF/language-model overoptimization paper) was made without a
+project-specific reference for how uncertainty should be combined in this
+exact REINVENT4/molecular-RL setting. After locating the actual relevant
+source -- Borja Medina's master's thesis, *"Uncertainty-aware reinforcement
+learning for chemical de novo design"* (implemented and evaluated directly
+within REINVENT4; code at
+`https://github.com/BorjaMedina/UncertaintyAwareRLforCLM`) -- it became clear
+UWO matches neither of the two strategies the thesis actually proposes and
+tests:
+
+- **Score Modulation (SM)**: `S_SM = MPO(s_1, ..., s_K, s_unc)` -- uncertainty
+  as its own independent term in the same geometric-mean MPO. This is what
+  this project's `UncertaintyPenalty`/`comp_uncertainty.py` already
+  implemented *before* the UWO detour (the "Score Modulation (SM) strategy
+  from the paper" comment in that file's docstring was already citing this
+  same thesis, correctly, even before it was re-read carefully this time).
+- **Loss Modulation (LM)**: uncertainty never touches the score; instead it
+  reweights each sample's contribution to the RL policy-gradient loss
+  (`L_LM = (1/N) sum_j [w_j/mean(w)] L_j`), leaving the reward function
+  completely intact.
+
+The thesis's own experiments (a controlled model system with analytically
+defined uncertainty, plus two real-data setups using ChemProp models and a
+conformal-prediction classifier) found **LM to be the most robust strategy
+overall**, with a specific argument for why SM underperforms: *"uncertainty is
+not a score itself... incorporating it directly into the optimization
+objective can distort the reward landscape and potentially drive the model
+toward directions that do not align with the underlying scoring objective."*
+UWO -- subtracting uncertainty directly from each property's own score --
+is arguably an even tighter entanglement of the two than SM, i.e. exactly the
+failure mode the thesis argues against, just applied per-property rather than
+as a separate MPO term.
+
+**Action taken**: scrapped `UncertaintyWeightedScore`/UWO entirely (file
+deleted, config reverted). Restored the pre-UWO Score Modulation setup
+(`config.json`, `optuna_rl_search.py`, `compare_hyperparams_replicated.py`,
+`generate_combo_files.py` all reverted to the 5-endpoint structure, pulled
+directly from the pre-UWO commit -- the pCMC direction fix from 2026-07-22 was
+already baked into that commit, so nothing needed re-fixing). Implemented Loss
+Modulation as a runtime monkeypatch (`workflow/reinvent_lm_patch.py` +
+`workflow/reinvent_with_lm.py`, see "Uncertainty-aware scoring" above) rather
+than a scoring-function component, since LM operates on REINVENT4's training
+loop itself, not the reward. Both SM-only and SM & LM were smoke-tested
+end-to-end through the real REINVENT pipeline (not just standalone) before
+adoption -- SM-only behaves identically to the pre-UWO baseline (regression
+check), and SM & LM engages the patch correctly (confirmed via its startup log
+message and the absence of any "components not found" fallback warning across
+every step) without altering the reported `Score` column, exactly as the
+thesis's design intends.
+
+**Why this matters beyond "using the right paper"**: the thesis's own
+critique of SM -- and by extension the even-more-entangled UWO -- is a
+plausible explanation for why the earlier 2x2 comparison (see Findings above)
+found `ZincPlausibility` narrowed diversity without improving fragment-level
+similarity to ZINC: folding a plausibility/reliability signal directly into
+the reward may distort what the RL reward actually optimizes for, rather than
+cleanly encouraging exploration of reliable-but-still-diverse regions the way
+a loss-reweighting approach would. This isn't re-litigated here (`ZincPlausibility`
+itself is a scoring component, not an uncertainty estimate, so LM's specific
+mechanism doesn't directly apply to it) but is worth keeping in mind if that
+finding gets revisited.
+
+## Production runs (2026-07-27/28): 24-combination HPO + evaluation sweep
+
+A full production comparison across three independent toggles: ZINC-plausibility
+on/off, uncertainty-handling mode (none/Score Modulation/Loss Modulation/both),
+and Pareto scoring (none/`ParetoBoost`/`ParetoGradient`, added *alongside*
+`pCMC`/`SurfTen`, not replacing them) -- 2x4x3 = **24 combinations**, each with
+its own hyperparameter search (maximizing mean `Score`, never rediscovery/
+holdout metrics) and production run, then a shared evaluation.
+
+### Flat top-100 holdouts (replacing the stratified quintile design for this run)
+
+Both SurfPro and ZINC holdouts are now the flat top-100 molecules by composite
+score, rather than the earlier 5-tier x 26 stratified design:
+
+- `workflow/build_surfpro_stratified_holdout.py` gained a `--mode {stratified,top_n}`
+  option; `--mode top_n --top-n 100` ranks by the same corrected-direction
+  `true_composite` and takes the top 100 as holdout, remainder (1451) as
+  trainval. The old stratified files are kept as `data/*.stale_stratified_130`.
+- ZINC's top-100 needed no rebuild: `data/zinc_holdout_low_pCMC_low_SurfTen.csv`
+  was already correctly ranked (post pCMC-fix) best-of-best; its first 100 rows
+  are `data/zinc_top100_holdout.csv`.
+- A fresh TL checkpoint was trained on the new 1451-molecule trainval set
+  (`runs/validation/tl_only_2026-07-27-16-04-35/generation_0/model/generation_0.model`),
+  so the 100 SurfPro holdout molecules are genuinely held out from transfer
+  learning -- otherwise "rediscovery rate" would be meaningless, since the
+  model would have already seen them during TL.
+
+### Pareto components fixed and wired in (never tested before this session)
+
+`scoring_functions/comp_pareto_boost.py` (`ParetoBoost`) and
+`comp_pareto_gradient.py` (`ParetoGradient`) were already in the repo
+(`Pareto`/`ParetoGradient` in `config.json`'s unused `ADDON_FUNCTIONS`) but had
+never actually been run. Two real bugs surfaced during first use:
+
+1. **pCMC direction**: fresh candidate molecules' pCMC prediction was
+   normalized but never inverted to match the Pareto front's "lower = better"
+   frame (built from `previous_df`'s un-inverted values). Note this is
+   *different* from what the README's 2026-07-22 pCMC-fix Findings originally
+   flagged as the suspected bug (`previous_df["pCMC"] = 1 - previous_df["pCMC"]`)
+   -- that line turns out to be direction-agnostic and correct as-is, since
+   REINVENT always reports scores as "higher = better" regardless of a
+   property's own `minimize` setting. Fixed by adding
+   `pCMC_predictions = 1 - pCMC_predictions` right after the fresh-candidate
+   normalization in both files.
+2. **`ParetoGradient` crashes when the front has < 3 points**
+   (`find_closest_point_on_line` needs at least 3 to define line segments) --
+   a pre-existing robustness gap, hit immediately while smoke-testing with a
+   small batch/few steps. Fixed with the same graceful fallback already used
+   for "no previous data yet" (returns `max_score` for that step).
+
+`workflow/optuna_rl_search.py`'s `make_toml()` gained `Pareto`/`ParetoGradient`
+branches (self-referential `data_path` pointing at that trial's own growing
+`trial_1.csv`, mirroring `generate_combo_files.py`'s existing pattern), and a
+new optional `weights: dict` parameter (per-component weight overrides, needed
+for Loss-Modulation-only runs where `pCMC_Uncertainty`/`SurfTen_Uncertainty`
+must be declared with weight=0 so the LM patch can read their scores without
+them entering Score Modulation). Both fixes were smoke-tested end-to-end
+through real REINVENT runs before use.
+
+### New evaluation metrics (`workflow/evaluate_run.py`)
+
+- `renormalized_score`: `sqrt(pCMC_raw_score * SurfTen_raw_score)`, computed
+  directly from the `pCMC (raw)`/`SurfTen (raw)` columns REINVENT always
+  writes (present regardless of what else is in a given combo's objective) --
+  a common, fairly-comparable score across all 24 combos, isolated from
+  ZINC/uncertainty/Pareto terms.
+- `nn_tanimoto_to_train`: mean nearest-neighbor Tanimoto similarity (Morgan
+  fingerprints) of the generated set to the SurfPro training set -- standard
+  MOSES/GuacaMol-style "similarity to reference" metric.
+- Flat top-100 rediscovery (`surfpro_top100`/`zinc_top100`: hits/n/rate),
+  additive alongside the existing tiered metrics (which now require an
+  explicit `--zinc-quintile-dir`/stratified `--surfpro-holdout` to activate --
+  they're skipped gracefully otherwise, e.g. for this run's flat holdouts).
+
+### Orchestration (`workflow/run_production_combo.py`, `submit_all_combos.sh`)
+
+One self-contained driver per combination: builds that combo's
+`scoring_functions`/per-component `weights` (equal `1/n_active` across
+whichever terms are actually in the geometric mean) and whether
+`REINVENT_LM_ENABLED` should be set, runs a 15-trial Optuna sweep
+(sigma/learning_rate/batch_size, maximizing mean top-100 `Score`), then 5
+production replicates at the best hyperparameters, then evaluates (pooled and
+per-replicate) with the full metric suite. `submit_all_combos.sh` generates
+and submits all 24 as independent sbatch jobs so SLURM can schedule them
+concurrently.
+
+**Storage**: each RL run (HPO trial or production replicate) writes an ~85MB
+model checkpoint; with 24 combos x 20 runs each that's 40+ GB if left in
+place. `run_production_combo.py` deletes each run's `checkpoints/`/`tb_logdir/`
+immediately after it's scored (keeping only the small `trial_1.csv`/`eval.json`
+the resume-from-cache logic needs), keeping total footprint for the whole
+sweep in the tens of MB rather than tens of GB. The whole `runs/` and
+redundant `data/ZINC/` intermediates were also cleared before this sweep
+started (freed ~10.7GB) since every prior finding was already captured in this
+README.
+
+Verified with a full small-scale end-to-end run (2 HPO trials, 2 replicates)
+of the most feature-complete combination (ZINC on, Score+Loss Modulation,
+`ParetoBoost`) before submitting the real 24-job sweep -- completed cleanly,
+produced sane metrics, and left only 1.8MB behind per the cleanup logic above.
+
+### Results
+
+All 24 jobs completed successfully (`runs/production/*/final_result.json`,
+5 replicates each). `workflow/gather_production_results.py` collects them into
+`runs/production/comparison_table.csv`; `workflow/make_production_figures.py`
+renders the two comparison figures below from that table.
+
+![Renormalized score, SurfPro/ZINC top-100 rediscovery, and NN-Tanimoto similarity across all 24 combinations](figures/production_sweep_scores.png)
+
+![Novelty, internal diversity, and validity across all 24 combinations](figures/production_sweep_diversity.png)
+
+**Best single result.** The highest SurfPro top-100 rediscovery rate in the
+whole sweep -- 36.2% of the 100 held-out best real surfactants, never seen
+during transfer learning, exactly regenerated -- came from ZINC-similarity
+on, Score+Loss Modulation together, no Pareto term. That same combination also
+had among the highest internal diversity (0.77) of the sweep, so this
+rediscovery rate was not bought by collapsing onto a narrow set of near-copies.
+
+**Renormalized score and rediscovery trade off against each other.** The
+combinations with the *highest* `renormalized_score` (pure pCMC+SurfTen
+optimization, e.g. ZINC off / LM / no Pareto: 0.536; ZINC off / LM /
+ParetoGradient: 0.533) had *low* SurfPro rediscovery (9-12%) and the lowest
+internal diversity of the sweep (~0.60-0.62). Conversely, the four
+combinations with the highest rediscovery rates (31-36%) all had middling
+renormalized scores (0.38-0.46). This is consistent with the surrogate-only
+objective being exploitable: pushing hardest on the raw pCMC/SurfTen score
+finds structures the surrogates rate very highly but that diverge from known
+actives, rather than literally rediscovering them.
+
+**ParetoBoost can collapse rediscovery.** Adding `ParetoBoost` on top of no
+uncertainty handling dropped SurfPro rediscovery from 31.4% to 3.6% (ZINC
+off) -- an 8-9x collapse -- while simultaneously producing the *highest*
+novelty (0.978) of that row. Since `ParetoBoost`/`ParetoGradient` build their
+reference front from the run's own previously generated molecules
+(Methods, self-referential `data_path`), this suggests the front can drift
+into a self-reinforcing region of chemical space that looks good under the
+run's own history without tracking the true best surfactants. `ParetoGradient`
+did not show the same collapse in this combination (33.6% rediscovery,
+similar diversity to no-Pareto), so the effect is specific to the fixed-bonus
+formulation rather than Pareto-based scoring in general.
+
+**ZINC-similarity (structural plausibility) has an inconsistent effect on
+score.** Holding uncertainty/Pareto mode fixed at none/none, turning ZINC
+plausibility on raised the renormalized score (0.456 to 0.513); with LM/none
+or SM+LM/none it *lowered* the renormalized score by 0.04-0.05. No single
+ZINC-similarity setting is universally better across the sweep -- its effect
+depends on which other scoring terms are active alongside it.
+
+**Structural anchoring and generative robustness held across the whole
+sweep.** Nearest-neighbor Tanimoto similarity to the training set stayed in a
+narrow 0.60-0.80 band in every combination (the fixed transfer-learning
+checkpoint anchors generation to surfactant-like chemotypes regardless of
+which scoring terms are active downstream), and validity (>=98.8%) and
+novelty (>=88%) stayed high across all 24 configurations -- none of the
+scoring-function combinations destabilized the generative process itself.
+
+**Caveat.** Each combination used a 15-trial HPO sweep and 5 replicates of
+only 20 RL steps each (Methods), chosen for storage/compute budget reasons
+across 24 combinations run in parallel, not because 20 steps is expected to
+be fully converged. Exact rediscovery-rate and renormalized-score numbers
+would likely shift somewhat with longer runs; the qualitative patterns above
+(the score/rediscovery trade-off, the ParetoBoost collapse, ZINC-similarity's
+inconsistent effect) are visible across multiple independent combinations
+each, which is why they are reported here rather than treated as one-off
+noise.
+
+Full per-combination numbers (including per-replicate values and best HPO
+hyperparameters) are in `runs/production/comparison_table.csv` and the
+individual `runs/production/<combo>/final_result.json` files.

@@ -140,6 +140,15 @@ class ParetoBoost:
 
         pCMC_predictions = run_prediction(smiles, self.pCMC_model_path)
         pCMC_predictions = normalize(pCMC_predictions, self.pCMC_min_value, self.pCMC_max_value)
+        # pCMC is maximized (higher pCMC = lower CMC = better; see README), but
+        # the Pareto front below and previous_df's un-inverted values are both
+        # in a "lower = better" frame (matching find_pareto_front's minimize-
+        # both-axes assumption). Invert here so fresh candidates use the same
+        # frame -- confirmed 2026-07-27 this was the one place still missing
+        # the pCMC direction fix; previous_df's own un-inversion needs no
+        # change since REINVENT's reported scores are always "higher=better"
+        # regardless of a property's own minimize setting.
+        pCMC_predictions = 1 - pCMC_predictions
 
         smiles_df = pd.DataFrame({
             "SMILES": smiles,

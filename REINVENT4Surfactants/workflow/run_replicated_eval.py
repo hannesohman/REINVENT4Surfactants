@@ -29,6 +29,7 @@ DEFAULT_PARAMS = {"sigma": 120, "learning_rate": 0.00038716608106033025, "batch_
 
 SCALAR_METRICS = [
     "validity", "uniqueness", "novelty", "internal_diversity",
+    "renormalized_score", "nn_tanimoto_to_train",
     "frag_similarity_train", "scaf_similarity_train",
     "frag_similarity_zinc", "scaf_similarity_zinc",
     "mean_score",
@@ -36,7 +37,7 @@ SCALAR_METRICS = [
 
 
 def run_replicate(rep_dir: Path, params, replicate_idx, tl_model, prior_file, steps,
-                   scoring_functions=None, weight=None):
+                   scoring_functions=None, weight=None, weights=None, env=None):
     rep_dir.mkdir(parents=True, exist_ok=True)
     (rep_dir / "checkpoints").mkdir(exist_ok=True)
     (rep_dir / "tb_logdir").mkdir(exist_ok=True)
@@ -44,15 +45,15 @@ def run_replicate(rep_dir: Path, params, replicate_idx, tl_model, prior_file, st
     toml_text = make_toml(
         rep_dir, tl_model, prior_file, params["sigma"], params["learning_rate"],
         params["batch_size"], steps, seed=replicate_idx,
-        scoring_functions=scoring_functions, weight=weight,
+        scoring_functions=scoring_functions, weight=weight, weights=weights,
     )
     toml_path = rep_dir / "rep.toml"
     toml_path.write_text(toml_text)
 
     log_path = rep_dir / "rep.log"
     result = subprocess.run(
-        [REINVENT_PYTHON, "-u", "-m", "reinvent", "-l", str(log_path), str(toml_path)],
-        capture_output=True, text=True,
+        [REINVENT_PYTHON, "-u", "workflow/reinvent_with_lm.py", "-l", str(log_path), str(toml_path)],
+        capture_output=True, text=True, env=env,
     )
     if result.returncode != 0:
         print(f"[rep {replicate_idx}] FAILED\n{result.stderr[-4000:]}", file=sys.stderr)
@@ -82,8 +83,9 @@ def main():
     ap.add_argument("--train-csv", default="data/surfpro_expanded_trainval_only.csv")
     ap.add_argument("--train-smiles-col", default="SMILES_canonical")
     ap.add_argument("--surfpro-holdout", default="data/surfpro_real_holdout_test_split.csv")
-    ap.add_argument("--zinc-quintile-dir", default="data")
+    ap.add_argument("--zinc-quintile-dir", default=None, help="omit to skip tiered ZINC metrics")
     ap.add_argument("--zinc-reference", default="data/zinc_reference_profile.json.gz")
+    ap.add_argument("--zinc-top100", default="data/zinc_top100_holdout.csv")
     ap.add_argument("--intdiv-sample", type=int, default=2000)
     args = ap.parse_args()
 
@@ -93,8 +95,10 @@ def main():
 
     print("loading fixed-cost resources once (train profile, ZINC tiers, ZINC reference)...", flush=True)
     resources = load_resources(
-        args.train_csv, args.train_smiles_col, args.surfpro_holdout,
-        args.zinc_quintile_dir, args.zinc_reference,
+        train_csv=args.train_csv, train_smiles_col=args.train_smiles_col,
+        surfpro_holdout=args.surfpro_holdout, zinc_reference=args.zinc_reference,
+        zinc_quintile_dir=args.zinc_quintile_dir,
+        surfpro_top100_csv=args.surfpro_holdout, zinc_top100_csv=args.zinc_top100,
     )
 
     per_rep_results = []
@@ -111,6 +115,7 @@ def main():
                 result = json.load(f)
             result["surfpro_tier_hits"] = {int(k): v for k, v in result["surfpro_tier_hits"].items()}
             result["zinc_tier_hits"] = {int(k): v for k, v in result["zinc_tier_hits"].items()}
+            # (surfpro_top100/zinc_top100 have no int keys to fix up)
         else:
             if not csv_path.exists():
                 csv_path_result = run_replicate(rep_dir, params, i, args.tl_model, args.prior_file, args.steps)
@@ -129,12 +134,16 @@ def main():
         result["replicate"] = i
         result["mean_score"] = mean_score
         per_rep_results.append(result)
-        print(
-            f"  replicate {i}: ok  mean_score={mean_score:.4f}  validity={result['validity']:.3f}  "
-            f"surfpro_top2={result['surfpro_top2_vs_bottom2']['top2']['rate']:.3f}  "
-            f"surfpro_bottom2={result['surfpro_top2_vs_bottom2']['bottom2']['rate']:.3f}",
-            flush=True,
-        )
+
+        status_bits = [f"mean_score={mean_score:.4f}", f"validity={result['validity']:.3f}"]
+        if result.get("surfpro_top2_vs_bottom2"):
+            status_bits.append(f"surfpro_top2={result['surfpro_top2_vs_bottom2']['top2']['rate']:.3f}")
+            status_bits.append(f"surfpro_bottom2={result['surfpro_top2_vs_bottom2']['bottom2']['rate']:.3f}")
+        if result.get("surfpro_top100"):
+            status_bits.append(f"surfpro_top100={result['surfpro_top100']['rate']:.3f}")
+        if result.get("zinc_top100"):
+            status_bits.append(f"zinc_top100={result['zinc_top100']['rate']:.6f}")
+        print(f"  replicate {i}: ok  " + "  ".join(status_bits), flush=True)
 
     if not per_rep_results:
         print("No replicates succeeded.", file=sys.stderr)
@@ -142,31 +151,50 @@ def main():
 
     agg = {m: mean_std([r[m] for r in per_rep_results]) for m in SCALAR_METRICS}
 
-    tiers = sorted(per_rep_results[0]["surfpro_tier_hits"].keys(), key=int)
-    agg["surfpro_tier_hits"] = {
-        t: mean_std([r["surfpro_tier_hits"][t]["rate"] for r in per_rep_results]) for t in tiers
-    }
-    agg["surfpro_top2_vs_bottom2"] = {
-        "top2": mean_std([r["surfpro_top2_vs_bottom2"]["top2"]["rate"] for r in per_rep_results]),
-        "bottom2": mean_std([r["surfpro_top2_vs_bottom2"]["bottom2"]["rate"] for r in per_rep_results]),
-    }
+    if per_rep_results[0].get("surfpro_tier_hits"):
+        tiers = sorted(per_rep_results[0]["surfpro_tier_hits"].keys(), key=int)
+        agg["surfpro_tier_hits"] = {
+            t: mean_std([r["surfpro_tier_hits"][t]["rate"] for r in per_rep_results]) for t in tiers
+        }
+    else:
+        tiers = []
 
-    zinc_tiers = sorted(per_rep_results[0]["zinc_tier_hits"].keys(), key=int)
-    agg["zinc_tier_hits"] = {
-        t: mean_std([r["zinc_tier_hits"][t]["rate"] for r in per_rep_results]) for t in zinc_tiers
-    }
+    if per_rep_results[0].get("surfpro_top2_vs_bottom2"):
+        agg["surfpro_top2_vs_bottom2"] = {
+            "top2": mean_std([r["surfpro_top2_vs_bottom2"]["top2"]["rate"] for r in per_rep_results]),
+            "bottom2": mean_std([r["surfpro_top2_vs_bottom2"]["bottom2"]["rate"] for r in per_rep_results]),
+        }
+
+    if per_rep_results[0].get("zinc_tier_hits"):
+        zinc_tiers = sorted(per_rep_results[0]["zinc_tier_hits"].keys(), key=int)
+        agg["zinc_tier_hits"] = {
+            t: mean_std([r["zinc_tier_hits"][t]["rate"] for r in per_rep_results]) for t in zinc_tiers
+        }
+    else:
+        zinc_tiers = []
+
+    if per_rep_results[0].get("surfpro_top100"):
+        agg["surfpro_top100"] = mean_std([r["surfpro_top100"]["rate"] for r in per_rep_results])
+    if per_rep_results[0].get("zinc_top100"):
+        agg["zinc_top100"] = mean_std([r["zinc_top100"]["rate"] for r in per_rep_results])
 
     print(f"\n=== AGGREGATE ({len(per_rep_results)} replicates, mean +/- std) ===")
     for m in SCALAR_METRICS:
         print(f"{m}: {agg[m]['mean']:.4f} +/- {agg[m]['std']:.4f}")
-    print("surfpro tier hit rates:")
-    for t in tiers:
-        print(f"  tier {t}: {agg['surfpro_tier_hits'][t]['mean']:.4f} +/- {agg['surfpro_tier_hits'][t]['std']:.4f}")
-    print(f"surfpro top2: {agg['surfpro_top2_vs_bottom2']['top2']['mean']:.4f} +/- {agg['surfpro_top2_vs_bottom2']['top2']['std']:.4f}")
-    print(f"surfpro bottom2: {agg['surfpro_top2_vs_bottom2']['bottom2']['mean']:.4f} +/- {agg['surfpro_top2_vs_bottom2']['bottom2']['std']:.4f}")
-    print("zinc tier hit rates:")
-    for t in zinc_tiers:
-        print(f"  tier {t}: {agg['zinc_tier_hits'][t]['mean']:.6f} +/- {agg['zinc_tier_hits'][t]['std']:.6f}")
+    if tiers:
+        print("surfpro tier hit rates:")
+        for t in tiers:
+            print(f"  tier {t}: {agg['surfpro_tier_hits'][t]['mean']:.4f} +/- {agg['surfpro_tier_hits'][t]['std']:.4f}")
+        print(f"surfpro top2: {agg['surfpro_top2_vs_bottom2']['top2']['mean']:.4f} +/- {agg['surfpro_top2_vs_bottom2']['top2']['std']:.4f}")
+        print(f"surfpro bottom2: {agg['surfpro_top2_vs_bottom2']['bottom2']['mean']:.4f} +/- {agg['surfpro_top2_vs_bottom2']['bottom2']['std']:.4f}")
+    if zinc_tiers:
+        print("zinc tier hit rates:")
+        for t in zinc_tiers:
+            print(f"  tier {t}: {agg['zinc_tier_hits'][t]['mean']:.6f} +/- {agg['zinc_tier_hits'][t]['std']:.6f}")
+    if "surfpro_top100" in agg:
+        print(f"surfpro top100: {agg['surfpro_top100']['mean']:.4f} +/- {agg['surfpro_top100']['std']:.4f}")
+    if "zinc_top100" in agg:
+        print(f"zinc top100: {agg['zinc_top100']['mean']:.6f} +/- {agg['zinc_top100']['std']:.6f}")
 
     with open(out_dir / "aggregate.json", "w") as f:
         json.dump({"per_replicate": per_rep_results, "aggregate": agg}, f, indent=2)

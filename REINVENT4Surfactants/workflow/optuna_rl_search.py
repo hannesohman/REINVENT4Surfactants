@@ -30,51 +30,52 @@ import pandas as pd
 
 REINVENT_PYTHON = sys.executable
 
-MODELS_PKL = "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl"
-
 SCORING_FUNCTIONS = {
     # pCMC = -log10(CMC): HIGHER pCMC = LOWER CMC = more efficient surfactant,
     # so it's maximized (minimize=False) -- confirmed empirically 2026-07-21,
     # see README. (Was minimize=True until this fix -- a real bug.)
-    #
-    # Uncertainty is combined via UWO (Coste et al. 2024, ICLR): combined =
-    # point_score - lambda_weight * uncertainty_score, inside a single
-    # UncertaintyWeightedScore component -- replaces the old separate
-    # pCMC_Uncertainty/SurfTen_Uncertainty geometric-mean terms (2026-07-22).
     "pCMC": {"minimize": False, "pkl": "pcmc_model.joblib",
-              "min_value": 0.0089955596692448, "max_value": 6.79588001734408,
-              "uncertainty_model_path": MODELS_PKL, "uncertainty_target": "pCMC",
-              "uncertainty_min_value": 0.0476, "uncertainty_max_value": 0.6120,
-              "lambda_weight": 0.5},
+              "min_value": 0.0089955596692448, "max_value": 6.79588001734408},
     "SurfTen": {"minimize": True, "pkl": "final_model_surface_tension_avg.joblib",
-                 "min_value": 173.98984, "max_value": 594.85364,
-                 "uncertainty_model_path": MODELS_PKL, "uncertainty_target": "surface_tension_avg",
-                 "uncertainty_min_value": 2.806, "uncertainty_max_value": 18.979,
-                 "lambda_weight": 0.5},
+                 "min_value": 173.98984, "max_value": 594.85364},
+    "pCMC_Uncertainty": {"minimize": True,
+                          "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+                          "target": "pCMC", "min_value": 0.0476, "max_value": 0.6120},
+    "SurfTen_Uncertainty": {"minimize": True,
+                             "model_path": "/proj/berzelius-2026-62/users/x_ribec/surfactant-surrogates/SurfPro-MD/surrogate-models/models.pkl",
+                             "target": "surface_tension_avg", "min_value": 2.806, "max_value": 18.979},
     "ZincPlausibility": {"minimize": False,
                           "reference_path": "data/zinc_reference_profile.json.gz",
                           "min_value": 0.0, "max_value": 1.0},
 }
-WEIGHT = 1 / 3  # equal-weighted, matching config.json (3 terms now, was 5)
+WEIGHT = 0.2  # equal-weighted, matching config.json
 
 
 def make_toml(trial_dir: Path, agent_file: str, prior_file: str, sigma: float,
               learning_rate: float, batch_size: int, steps: int, seed: int,
-              scoring_functions: dict = None, weight: float = None) -> str:
+              scoring_functions: dict = None, weight: float = None,
+              weights: dict = None) -> str:
+    """`weight`: uniform weight applied to every component (backward-compatible
+    default). `weights`: optional {name: weight} overrides for specific
+    components (e.g. declaring pCMC_Uncertainty/SurfTen_Uncertainty with
+    weight=0 for Loss-Modulation-only runs, while other terms use `weight`)."""
     if scoring_functions is None:
         scoring_functions = SCORING_FUNCTIONS
     if weight is None:
         weight = WEIGHT
+    if weights is None:
+        weights = {}
 
     components = ""
     for name, pkg in scoring_functions.items():
+        this_weight = weights.get(name, weight)
         if name.endswith("_Uncertainty"):
             components += f"""
 [[stage.scoring.component]]
 [stage.scoring.component.UncertaintyPenalty]
 [[stage.scoring.component.UncertaintyPenalty.endpoint]]
 name = "{name}"
-weight = {weight:.2f}
+weight = {this_weight:.2f}
 params.model_path = "{pkg['model_path']}"
 params.target = "{pkg['target']}"
 params.min_value = {pkg['min_value']}
@@ -87,28 +88,50 @@ params.minimize = {str(pkg['minimize']).lower()}
 [stage.scoring.component.ZincPlausibility]
 [[stage.scoring.component.ZincPlausibility.endpoint]]
 name = "{name}"
-weight = {weight:.2f}
+weight = {this_weight:.2f}
 params.reference_path = "{pkg['reference_path']}"
 params.min_value = {pkg['min_value']}
 params.max_value = {pkg['max_value']}
 params.minimize = {str(pkg['minimize']).lower()}
 """
-        elif "uncertainty_model_path" in pkg:
+        elif name == "Pareto":
+            # Self-referential data_path: points at THIS trial's own
+            # progressively-written summary CSV (same pattern as
+            # generate_combo_files.py's Pareto branch), so the Pareto front
+            # evolves from this trial's own earlier steps.
             components += f"""
 [[stage.scoring.component]]
-[stage.scoring.component.UncertaintyWeightedScore]
-[[stage.scoring.component.UncertaintyWeightedScore.endpoint]]
+[stage.scoring.component.ParetoBoost]
+[[stage.scoring.component.ParetoBoost.endpoint]]
 name = "{name}"
-weight = {weight:.2f}
-params.model_path = "models/{pkg['pkl']}"
-params.min_value = {pkg['min_value']}
-params.max_value = {pkg['max_value']}
-params.minimize = {str(pkg['minimize']).lower()}
-params.uncertainty_model_path = "{pkg['uncertainty_model_path']}"
-params.uncertainty_target = "{pkg['uncertainty_target']}"
-params.uncertainty_min_value = {pkg['uncertainty_min_value']}
-params.uncertainty_max_value = {pkg['uncertainty_max_value']}
-params.lambda_weight = {pkg['lambda_weight']}
+weight = {this_weight:.2f}
+params.data_path = "{trial_dir}/trial_1.csv"
+params.skip = {pkg.get("skip", 0)}
+params.SurfTen_model_path = "models/{pkg['SurfTen']['pkl']}"
+params.SurfTen_min_value = {pkg['SurfTen']['min_value']}
+params.SurfTen_max_value = {pkg['SurfTen']['max_value']}
+params.pCMC_model_path = "models/{pkg['pCMC']['pkl']}"
+params.pCMC_min_value = {pkg['pCMC']['min_value']}
+params.pCMC_max_value = {pkg['pCMC']['max_value']}
+params.base_score = {pkg.get("base_score", 1.0)}
+params.boost_factor = {pkg.get("boost_factor", 1.0)}
+"""
+        elif name == "ParetoGradient":
+            components += f"""
+[[stage.scoring.component]]
+[stage.scoring.component.ParetoGradient]
+[[stage.scoring.component.ParetoGradient.endpoint]]
+name = "{name}"
+weight = {this_weight:.2f}
+params.data_path = "{trial_dir}/trial_1.csv"
+params.distance_exponent = {pkg.get("distance_exponent", 1.0)}
+params.max_score = {pkg.get("max_score", 1.0)}
+params.SurfTen_model_path = "models/{pkg['SurfTen']['pkl']}"
+params.SurfTen_min_value = {pkg['SurfTen']['min_value']}
+params.SurfTen_max_value = {pkg['SurfTen']['max_value']}
+params.pCMC_model_path = "models/{pkg['pCMC']['pkl']}"
+params.pCMC_min_value = {pkg['pCMC']['min_value']}
+params.pCMC_max_value = {pkg['pCMC']['max_value']}
 """
         else:
             components += f"""
@@ -116,7 +139,7 @@ params.lambda_weight = {pkg['lambda_weight']}
 [stage.scoring.component.SurrogateModel]
 [[stage.scoring.component.SurrogateModel.endpoint]]
 name = "{name}"
-weight = {weight:.2f}
+weight = {this_weight:.2f}
 params.model_path = "models/{pkg['pkl']}"
 params.min_value = {pkg['min_value']}
 params.max_value = {pkg['max_value']}
@@ -172,7 +195,7 @@ def run_trial(trial: optuna.Trial, args) -> float:
 
     log_path = trial_dir / "trial.log"
     result = subprocess.run(
-        [REINVENT_PYTHON, "-u", "-m", "reinvent", "-l", str(log_path), str(toml_path)],
+        [REINVENT_PYTHON, "-u", "workflow/reinvent_with_lm.py", "-l", str(log_path), str(toml_path)],
         capture_output=True, text=True,
     )
     if result.returncode != 0:

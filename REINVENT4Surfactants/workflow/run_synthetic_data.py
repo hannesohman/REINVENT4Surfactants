@@ -52,7 +52,7 @@ def run_single_multiple(folder):
     start_time = time.time()
     try:
         subprocess.run(
-            [sys.executable, "-u", "-m", "reinvent", "-l", f"{log_path}/{folder.name}.log", str(toml_file)],
+            [sys.executable, "-u", "workflow/reinvent_with_lm.py", "-l", f"{log_path}/{folder.name}.log", str(toml_file)],
             check=True,
             capture_output=True,
             text=True,
