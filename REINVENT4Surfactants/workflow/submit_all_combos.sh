@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TL_MODEL="runs/validation/tl_only_2026-07-27-16-04-35/generation_0/model/generation_0.model"
+TL_MODEL="runs/validation/tl_only_2026-07-29-12-30-48/generation_0/model/generation_0.model"
 JOBS_DIR="runs/production_jobs"
 OUT_BASE="runs/production"
 HPO_TRIALS=15

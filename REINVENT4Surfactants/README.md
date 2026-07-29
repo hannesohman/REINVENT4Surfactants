@@ -1366,129 +1366,136 @@ of the most feature-complete combination (ZINC on, Score+Loss Modulation,
 `ParetoBoost`) before submitting the real 24-job sweep -- completed cleanly,
 produced sane metrics, and left only 1.8MB behind per the cleanup logic above.
 
-### Results
+### Findings (2026-07-29): SurfPro holdout leaked via homologous series -- rebuilt with a cluster-based split
 
-All 24 jobs completed successfully (`runs/production/*/final_result.json`,
-5 replicates each). `workflow/gather_production_results.py` collects them into
-`runs/production/comparison_table.csv`; `workflow/make_production_figures.py`
-renders the two comparison figures below from that table.
+The best production result from the first sweep -- 36.2% exact-SMILES
+SurfPro top-100 rediscovery -- prompted the obvious follow-up question: is
+that suspiciously good? It was, and the mechanism was concrete and
+disqualifying.
+
+**Diagnosis.** First ruled out direct identity leakage into the
+`ZincPlausibility` reference vocabulary: 0/100 holdout molecules (and only
+1/1551 of the full SurfPro-MD set) appear in the 200k-molecule ZINC sample
+used to build that component's BRICS vocabulary, and only 1/100 holdout
+molecules appear anywhere in the full 11.3M-molecule ZINC catalog. That
+wasn't it.
+
+The real mechanism: sampling directly from the transfer-learning checkpoint
+-- **zero RL steps, zero reward optimization, zero scoring** -- exactly
+rediscovered **65 of the 100 holdout molecules (65%)**, higher than any of
+the 24 RL-optimized combinations managed. Murcko scaffold analysis explained
+why: excluding trivial empty (acyclic) scaffolds, 26 of the 32
+ring-containing holdout molecules (81%) shared an *exact* scaffold with a
+trainval molecule -- literal homologous series (same gemini-quat/headgroup
+skeleton, different alkyl chain length), e.g.:
+
+- Holdout: `...CCCCCCCCCCCCCCCCCC[N+]1(CC#CC[N+]2(CCCCCCCCCCCCCCCCCC)...` (C18 tails)
+- Trainval: `...CCCCCCCCCCCCCC[N+]1(CC#CC[N+]2(CCCCCCCCCCCCCC)...` (identical skeleton, C14 tails)
+
+The flat top-100-by-composite-score split has no scaffold-disjointness
+constraint, so transfer learning saw the exact scaffold of many holdout
+molecules at a different chain length. The model didn't need to generalize;
+it just needed to interpolate chain length on a skeleton it had already
+trained on extensively -- which a well-fit RNN prior does easily by sampling
+alone, no RL required.
+
+**Fix.** `workflow/build_surfpro_stratified_holdout.py --mode cluster`:
+clusters the full 1551-molecule SurfPro-MD set via union-find, merging two
+molecules if they share an identical non-empty Murcko scaffold *or* their
+Morgan-fingerprint (radius 2, 2048 bit) Tanimoto distance is below 0.35 --
+pure fingerprint clustering alone still missed ~33% of scaffold-sibling
+pairs, since a large chain-length delta shifts the fingerprint enough to miss
+a similarity cutoff even though the Murcko scaffold is identical, so scaffold
+identity is unioned in as a hard rule on top. Whole clusters (never split)
+are then greedily added to the holdout in descending order of mean composite
+score until the 100-120 molecule target is reached, so the holdout stays
+biased toward the best real surfactants as originally intended. This landed
+on **105 holdout molecules from the top 29 (of 161) clusters**, backing off
+the old flat top-100/1451-trainval split (preserved as `data/*.stale_flat_top100`)
+to a new 105-holdout/1446-trainval split.
+
+**Validation.** Both diagnostics that caught the original leak were rerun
+against the new split and a freshly retrained TL checkpoint
+(`runs/validation/tl_only_2026-07-29-12-30-48/`):
+- Scaffold overlap (ring-containing holdout molecules sharing a trainval
+  scaffold): **0/41 (0%)**, down from 26/32 (81%).
+- Pure TL-checkpoint sampling rediscovery (zero RL): **2/105 (1.9%)**, down
+  from 65/100 (65%) -- and the 2 remaining hits are simple, generic
+  short-chain amine surfactants (not homolog leakage), a healthy baseline
+  rate for a genuine holdout.
+
+All 24 production combinations were relaunched against the corrected holdout
+and TL checkpoint (same HPO/replicate/steps budget as before). One job
+(`zinc_on-unc_none-pareto_boost`) hit its 8-hour walltime after finishing HPO
+and 3/5 replicates; resubmitted with a longer walltime and the existing
+resume-from-cache logic picked up exactly where it left off. Results below.
+
+### Results (re-run with the corrected holdout)
 
 ![Renormalized score, SurfPro/ZINC top-100 rediscovery, and NN-Tanimoto similarity across all 24 combinations](figures/production_sweep_scores.png)
 
 ![Novelty, internal diversity, and validity across all 24 combinations](figures/production_sweep_diversity.png)
 
-**Best single result.** The highest SurfPro top-100 rediscovery rate in the
-whole sweep -- 36.2% of the 100 held-out best real surfactants, never seen
-during transfer learning, exactly regenerated -- came from ZINC-similarity
-on, Score+Loss Modulation together, no Pareto term. That same combination also
-had among the highest internal diversity (0.77) of the sweep, so this
-rediscovery rate was not bought by collapsing onto a narrow set of near-copies.
+**SurfPro top-100 rediscovery is now at floor everywhere (0.0-0.5%),** as it
+should be for a genuinely disjoint holdout: with only 20 RL steps and 5
+replicates per combination, exactly regenerating one of 105 held-out
+molecules that share no scaffold with anything seen during transfer learning
+is a rare event by design, not a bug. This is itself confirmation of how much
+the previous 9-36% figures were inflated by the homolog leak, and means
+SurfPro rediscovery isn't a useful discriminator between combinations at this
+compute budget -- a real generalization test at this holdout's difficulty
+would need substantially more RL steps and/or larger sampling budgets, which
+is future work rather than something to chase within this sweep.
 
-**Renormalized score and rediscovery trade off against each other.** The
-combinations with the *highest* `renormalized_score` (pure pCMC+SurfTen
-optimization, e.g. ZINC off / LM / no Pareto: 0.536; ZINC off / LM /
-ParetoGradient: 0.533) had *low* SurfPro rediscovery (9-12%) and the lowest
-internal diversity of the sweep (~0.60-0.62). Conversely, the four
-combinations with the highest rediscovery rates (31-36%) all had middling
-renormalized scores (0.38-0.46). This is consistent with the surrogate-only
-objective being exploitable: pushing hardest on the raw pCMC/SurfTen score
-finds structures the surrogates rate very highly but that diverge from known
-actives, rather than literally rediscovering them.
+**ZINC top-100 rediscovery is the informative rediscovery metric this time**
+(12-23% across combinations, unaffected by the SurfPro-side leak since it's
+built independently from the ZINC catalog). Marginally, ZINC-similarity
+being *on* only helps this metric when no Pareto term is active (0.207 vs.
+0.165-0.171 for boost/gradient); with ZINC-similarity off, all three Pareto
+modes give similar rediscovery (~0.164-0.175). So "no Pareto is better for
+rediscovery" -- the headline finding from the first (leaky) sweep -- only
+replicates here conditional on ZINC-similarity being on.
 
-**ParetoBoost can collapse rediscovery.** Adding `ParetoBoost` on top of no
-uncertainty handling dropped SurfPro rediscovery from 31.4% to 3.6% (ZINC
-off) -- an 8-9x collapse -- while simultaneously producing the *highest*
-novelty (0.978) of that row. Since `ParetoBoost`/`ParetoGradient` build their
-reference front from the run's own previously generated molecules
-(Methods, self-referential `data_path`), this suggests the front can drift
-into a self-reinforcing region of chemical space that looks good under the
-run's own history without tracking the true best surfactants. `ParetoGradient`
-did not show the same collapse in this combination (33.6% rediscovery,
-similar diversity to no-Pareto), so the effect is specific to the fixed-bonus
-formulation rather than Pareto-based scoring in general.
+**Score Modulation (SM) now raises internal diversity and ZINC rediscovery
+the most,** rather than being roughly neutral as in the first sweep: SM has
+the highest marginal internal diversity (0.746) and ZINC top-100 rate
+(0.202) of the four uncertainty modes, at the cost of the lowest
+renormalized score (0.416) and lowest novelty (0.894). Loss Modulation (LM)
+remains the mirror image -- highest renormalized score (0.486, tied with
+`none`) but lowest diversity (0.662) and lowest ZINC rediscovery (0.157) --
+consistent with the same score/diversity trade-off documented before: LM
+sharpens the raw optimization target at the cost of exploration.
 
-**ZINC-similarity (structural plausibility) has an inconsistent effect on
-score.** Holding uncertainty/Pareto mode fixed at none/none, turning ZINC
-plausibility on raised the renormalized score (0.456 to 0.513); with LM/none
-or SM+LM/none it *lowered* the renormalized score by 0.04-0.05. No single
-ZINC-similarity setting is universally better across the sweep -- its effect
-depends on which other scoring terms are active alongside it.
+**ZINC-similarity's marginal effect stays small and roughly a wash**, same
+conclusion as the first sweep: renormalized score (0.457 off vs. 0.451 on),
+novelty (0.928 vs. 0.924), and diversity (0.708 vs. 0.701) are all within
+noise of each other. It does raise nearest-neighbor training-set similarity
+slightly (0.766 to 0.781), consistent with the plausibility term nudging
+generation toward more familiar structural motifs.
 
-**Structural anchoring and generative robustness held across the whole
-sweep.** Nearest-neighbor Tanimoto similarity to the training set stayed in a
-narrow 0.60-0.80 band in every combination (the fixed transfer-learning
-checkpoint anchors generation to surfactant-like chemotypes regardless of
-which scoring terms are active downstream), and validity (>=98.8%) and
-novelty (>=88%) stayed high across all 24 configurations -- none of the
-scoring-function combinations destabilized the generative process itself.
+**Top combinations by renormalized score** are dominated by Loss Modulation
+without SM: ZINC off/LM/ParetoGradient (0.536), ZINC off/LM/none (0.533),
+ZINC off/none/none (0.518). **Top combinations by ZINC top-100 rediscovery**
+are a different, SM-favoring set: ZINC off/SM/ParetoGradient (0.232), ZINC
+off/SM+LM/none (0.224), ZINC on/none/ParetoGradient (0.218) -- reinforcing
+that no single combination dominates both the raw-score and the
+rediscovery/diversity axes; which one to prefer depends on whether the goal
+is pushing the surrogate objective as hard as possible or generating a
+broader, more literature-similar set of candidates.
 
-**Caveat.** Each combination used a 15-trial HPO sweep and 5 replicates of
-only 20 RL steps each (Methods), chosen for storage/compute budget reasons
-across 24 combinations run in parallel, not because 20 steps is expected to
-be fully converged. Exact rediscovery-rate and renormalized-score numbers
-would likely shift somewhat with longer runs; the qualitative patterns above
-(the score/rediscovery trade-off, the ParetoBoost collapse, ZINC-similarity's
-inconsistent effect) are visible across multiple independent combinations
-each, which is why they are reported here rather than treated as one-off
-noise.
-
-Full per-combination numbers (including per-replicate values and best HPO
-hyperparameters) are in `runs/production/comparison_table.csv` and the
-individual `runs/production/<combo>/final_result.json` files.
-
-### Property-space scatter plots (`workflow/make_pcmc_surften_scatter.py`)
-
-For each combination, per-molecule pCMC/SurfTen predictions are recovered in
-the surrogate models' native units by inverting REINVENT's `[0,1]` score
-normalization with the calibration bounds in `config.json` (linear min-max,
-see `comp_surrogate_XGB.py`), pooled across the 5 replicates, subsampled to
-1500 points for plotting, and a small number (~1%) of exact `(0, 0)`-score
-rows -- scoring-failure artifacts from out-of-distribution structures the
-surrogate pipeline couldn't featurize, not genuinely poor predictions -- are
-dropped. The real SurfPro top-100 holdout is overlaid as ground truth in every
-panel:
+**Property-space overlap remains strong despite near-zero exact rediscovery.**
+The pCMC/SurfTen scatter plots below (predicted values, real units, SurfPro
+top-100 holdout overlaid as black stars) show the generated clouds
+substantially overlapping the true top-100's property region in every
+combination, even though essentially none of the exact molecules are
+recovered -- the model is learning to produce property-good molecules
+broadly, not memorizing/copying specific structures, which is the intended
+behavior once homolog leakage is removed.
 
 ![SurfTen vs pCMC, ZINC-similarity on](figures/pcmc_surften_scatter_zinc_on.png)
 
 ![SurfTen vs pCMC, ZINC-similarity off](figures/pcmc_surften_scatter_zinc_off.png)
 
-The generated clouds sit systematically above/left of the true top-100
-holdout (worse on one or both axes) in every combination -- consistent with
-the score/rediscovery trade-off above -- but a dense tail reaches into the
-holdout's region in all 24 panels, and the `none`/`gradient` Pareto
-combinations visibly pull the densest part of the cloud closest to the
-holdout stars.
-
-### Full comparison table
-
-| ZINC | Uncertainty | Pareto | Renorm. score | SurfPro top-100 | ZINC top-100 | Novelty | Int. diversity | Validity | NN-Tanimoto (train) |
-|---|---|---|---|---|---|---|---|---|---|
-| off | none | none | 0.456 | 0.314 | 0.188 | 0.923 | 0.760 | 0.990 | 0.772 |
-| off | none | boost | 0.498 | 0.036 | 0.096 | 0.978 | 0.689 | 0.991 | 0.622 |
-| off | none | gradient | 0.437 | 0.336 | 0.184 | 0.913 | 0.768 | 0.994 | 0.774 |
-| off | sm | none | 0.449 | 0.308 | 0.192 | 0.925 | 0.748 | 0.996 | 0.784 |
-| off | sm | boost | 0.478 | 0.140 | 0.126 | 0.934 | 0.704 | 0.992 | 0.792 |
-| off | sm | gradient | 0.452 | 0.134 | 0.196 | 0.953 | 0.725 | 0.998 | 0.752 |
-| off | lm | none | 0.536 | 0.092 | 0.110 | 0.975 | 0.618 | 0.990 | 0.753 |
-| off | lm | boost | 0.487 | 0.056 | 0.126 | 0.975 | 0.654 | 0.988 | 0.702 |
-| off | lm | gradient | 0.533 | 0.124 | 0.126 | 0.968 | 0.604 | 0.990 | 0.794 |
-| off | sm_lm | none | 0.426 | 0.203 | 0.198 | 0.940 | 0.705 | 0.998 | 0.798 |
-| off | sm_lm | boost | 0.423 | 0.098 | 0.144 | 0.933 | 0.716 | 0.994 | 0.782 |
-| off | sm_lm | gradient | 0.439 | 0.198 | 0.190 | 0.944 | 0.703 | 0.997 | 0.782 |
-| on | none | none | **0.513** | 0.174 | 0.152 | 0.958 | 0.669 | 0.990 | 0.767 |
-| on | none | boost | 0.501 | 0.092 | 0.138 | 0.968 | 0.677 | 0.995 | 0.710 |
-| on | none | gradient | 0.501 | 0.108 | 0.104 | 0.953 | 0.677 | 0.993 | 0.768 |
-| on | sm | none | 0.460 | 0.203 | 0.170 | 0.950 | 0.691 | 0.994 | 0.780 |
-| on | sm | boost | 0.468 | 0.130 | 0.172 | 0.955 | 0.693 | 0.997 | 0.763 |
-| on | sm | gradient | 0.448 | 0.212 | 0.205 | 0.937 | 0.712 | 0.999 | 0.786 |
-| on | lm | none | 0.493 | 0.220 | 0.166 | 0.950 | 0.666 | 0.996 | 0.791 |
-| on | lm | boost | 0.481 | 0.174 | 0.182 | 0.957 | 0.679 | 0.995 | 0.771 |
-| on | lm | gradient | 0.492 | 0.158 | 0.146 | 0.958 | 0.630 | 0.992 | 0.800 |
-| on | sm_lm | none | 0.379 | **0.362** | **0.222** | 0.883 | **0.769** | 0.998 | 0.778 |
-| on | sm_lm | boost | 0.380 | 0.256 | 0.204 | 0.914 | 0.749 | 0.998 | 0.781 |
-| on | sm_lm | gradient | 0.440 | 0.080 | 0.128 | 0.966 | 0.662 | 0.991 | 0.750 |
-
-Bold marks the best value per column among the top few candidates discussed
-above (highest renormalized score: ZINC on/none/none; highest SurfPro/ZINC
-rediscovery and internal diversity: ZINC on/SM+LM/none). Generated fresh from
-`runs/production/comparison_table.csv` via `df.to_markdown()`.
+Full per-combination numbers (including per-replicate values and best HPO
+hyperparameters) are in `runs/production/comparison_table.csv` and the
+individual `runs/production/<combo>/final_result.json` files.
