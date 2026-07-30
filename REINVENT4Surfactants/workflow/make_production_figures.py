@@ -76,7 +76,7 @@ def main():
         df,
         [
             ("renormalized_score", "Renormalized score\n(pCMC + SurfTen only)", "score", (0, 0.65)),
-            ("surfpro_top100", "SurfPro top-100\nrediscovery rate", "rate", (0, 0.45)),
+            ("surfpro_top100", "SurfPro top-100\nrediscovery rate", "rate", (0, 0.02)),
             ("zinc_top100", "ZINC top-100\nrediscovery rate", "rate", (0, 0.30)),
             ("nn_tanimoto_to_train", "NN Tanimoto similarity\nto training set", "similarity", (0, 1.0)),
         ],
