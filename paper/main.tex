@@ -101,7 +101,7 @@ This deliberately avoids molecule-level nearest-neighbour similarity search agai
 Two additional scoring components track the empirical (pCMC, SurfTen) Pareto front realised by the agent's own previously generated molecules, added alongside (not replacing) the direct pCMC/SurfTen terms.
 ParetoBoost assigns a fixed bonus to candidates that dominate or extend the current front;
 ParetoGradient instead assigns a continuous score based on the candidate's distance to the nearest segment of the front, so that near-miss candidates are still rewarded proportionally.
-Both recompute the front from the same run's own generated-molecule log at each step, so the reference front evolves together with the policy.
+Both maintain the front as an incrementally-updated running set (a dominated point can never re-enter the front once superseded, so each step's new candidates only need to be checked against, and folded into, the current front rather than the full generated-molecule history), so the reference front evolves together with the policy at a cost independent of how many steps have already run.
 
 \subsection{Uncertainty-aware scoring: Score Modulation and Loss Modulation}
 \label{sec:methods:uncertainty}
@@ -137,7 +137,9 @@ From the 1551 curated SurfPro-MD molecules, a composite quality score is compute
     \label{eq:composite}
 \end{equation}
 using the true measured property values and the same normalisation convention as Eq.~\ref{eq:normalize}.
-The 100 molecules with the highest composite score are held out as the ground-truth SurfPro test set; the remaining 1451 molecules form the transfer-learning trainval set (Section~\ref{sec:methods:generative}).
+A flat split that holds out the top-100 molecules by composite score directly was found to leak into transfer learning: SurfPro-MD contains homologous series (the same core scaffold at different alkyl chain lengths), and a flat top-$N$ split has no scaffold-disjointness constraint, so a held-out molecule's exact scaffold could still appear in the trainval set at a different chain length. Sampling directly from a transfer-learning checkpoint trained on such a split, with no reinforcement learning at all, exactly regenerated 65\% of a flat top-100 holdout -- higher than any subsequently RL-optimised combination achieved -- confirming the model was exploiting this leakage rather than generalising.
+
+The holdout is therefore constructed to keep every homologous/structural family entirely on one side of the split. All 1551 molecules are clustered via union-find, merging two molecules if they share an identical non-empty Bemis--Murcko scaffold \emph{or} their Morgan-fingerprint (radius 2, 2048 bit) Tanimoto distance is below 0.35 (fingerprint similarity alone under-merges same-scaffold pairs with a large chain-length difference, since that shifts the fingerprint distance without changing the scaffold). Whole clusters are then greedily added to the holdout, highest mean composite score first, until a target of 100--120 molecules is reached; this yielded 105 holdout molecules from the top 29 (of 161) clusters, with the remaining 1446 molecules forming the transfer-learning trainval set (Section~\ref{sec:methods:generative}). Re-running both diagnostics against the corrected split confirmed the fix: scaffold overlap between holdout and trainval dropped from 81\% to 0\%, and zero-RL-step sampling rediscovery dropped from 65\% to 1.9\%.
 
 \paragraph{ZINC holdout.}
 A second, independent holdout is drawn from the ZINC20 in-stock (purchasable) chemical space\cite{irwin_zinc20_2020}: approximately 11.3 million standardised molecules obtained via bulk tranche download, restricted to purchasability classes A/B/C.
@@ -148,8 +150,9 @@ Because this holdout is ranked purely by surrogate-predicted properties rather t
 \subsection{Hyperparameter optimisation}
 \label{sec:methods:hpo}
 
-Hyperparameters ($\sigma$, learning rate, batch size) are optimised independently for each experimental condition (Section~\ref{sec:methods:design}) using Optuna\cite{optuna_2019} with its default tree-structured Parzen estimator sampler, maximising the mean composite \texttt{Score} (Eq.~\ref{eq:sm}/the corresponding MPO for that condition) over the top-100 scoring molecules of a short (20-step) trial.
-The search space is $\sigma\in[50,500]$ (log-uniform, integer), learning rate $\in[10^{-5},10^{-3}]$ (log-uniform), and batch size $\in\{64,128,256,512\}$ (categorical).
+Hyperparameters ($\sigma$, learning rate, batch size) are optimised independently for each experimental condition (Section~\ref{sec:methods:design}) using Optuna\cite{optuna_2019} with its default tree-structured Parzen estimator sampler, maximising the mean composite \texttt{Score} (Eq.~\ref{eq:sm}/the corresponding MPO for that condition) over the top-5\% scoring molecules of a trial.
+The search space is $\sigma\in[50,500]$ (log-uniform, integer), learning rate $\in[10^{-5},10^{-3}]$ (log-uniform), and batch size $\in\{10,50,100,200,500\}$ (categorical); step count is not fixed but derived per trial as a fixed oracle budget of 10{,}000 proposed molecules divided by that trial's batch size, so every trial proposes the same total number of molecules regardless of how it is split between batch size and step count.
+An earlier version of this objective took a \emph{fixed} top-100 count rather than a percentile: since the candidate pool size scales with batch size for a fixed step count, a fixed-count top-$N$ objective is an increasingly extreme order statistic for larger batches, mechanically favouring the largest batch size in the search space regardless of whether the resulting policy is actually better. This was identified after every independently-tuned condition converged on the largest available batch size; switching to a percentile-based objective removes the dependence on pool size.
 Every trial for a given condition starts from the same fixed, already-fine-tuned TL checkpoint, so that only the RL steps themselves are repeated across trials.
 The optimisation objective is deliberately restricted to the RL reward itself: neither the SurfPro nor the ZINC holdout is used to guide hyperparameter selection, since doing so would constitute a form of validation leakage and invalidate any subsequent rediscovery-rate comparison.
 Holdout-based metrics (Section~\ref{sec:methods:evaluation}) are computed only afterward, using the best hyperparameters found.
@@ -157,24 +160,24 @@ Holdout-based metrics (Section~\ref{sec:methods:evaluation}) are computed only a
 \subsection{Experimental design: combinatorial evaluation}
 \label{sec:methods:design}
 
-Three scoring-function choices are varied independently: (i) whether the structural plausibility term is included (ZincPlausibility on/off); (ii) the uncertainty-handling mode (none, Score Modulation, Loss Modulation, or both jointly); and (iii) the Pareto-based term added alongside pCMC/SurfTen (none, ParetoBoost, or ParetoGradient).
-This gives $2\times4\times3=24$ combinations in total.
-For a given combination, every scoring component with non-zero weight in Eq.~\ref{eq:sm} is weighted equally, $w_i=1/n_\mathrm{active}$; when Loss Modulation is enabled without Score Modulation, the underlying uncertainty components are still computed (so that Eq.~\ref{eq:lm} can read their scores) but are assigned weight zero in the geometric mean.
-For each of the 24 combinations, the hyperparameter search of Section~\ref{sec:methods:hpo} is run for 15 trials, followed by 5 independent production replicates (20 RL steps each, distinct random seeds) using the best hyperparameters found, all initialised from the same shared TL checkpoint.
+Three scoring-function choices are varied independently: (i) whether the structural plausibility term is included (ZincPlausibility on/off); (ii) the uncertainty-handling mode; and (iii) the Pareto-based term added alongside pCMC/SurfTen (none, ParetoBoost, or ParetoGradient).
+An initial $2\times4\times3=24$-combination sweep tested all four uncertainty modes (none, Score Modulation, Loss Modulation, and both jointly); Score Modulation and Score+Loss Modulation together did not outperform Loss Modulation alone or no uncertainty handling on renormalised score, and did not add a qualitatively distinct pattern beyond what Loss Modulation already showed, so subsequent combinations retain only the \emph{none} and \emph{Loss Modulation} uncertainty modes, giving $2\times2\times3=12$ combinations.
+For a given combination, every scoring component with non-zero weight in Eq.~\ref{eq:sm} is weighted equally, $w_i=1/n_\mathrm{active}$; when Loss Modulation is enabled, the underlying uncertainty components are still computed (so that Eq.~\ref{eq:lm} can read their scores) but are assigned weight zero in the geometric mean.
+For each combination, the hyperparameter search of Section~\ref{sec:methods:hpo} is run for 15 trials, followed by 20 independent production replicates (distinct random seeds, step count set by the same oracle-budget rule as the HPO trials) using the best hyperparameters found, all initialised from the same shared TL checkpoint.
 
 \subsection{Evaluation metrics}
 \label{sec:methods:evaluation}
 
-All metrics are computed on the pooled set of unique, RDKit-canonicalised SMILES across the 5 production replicates of a given combination (and, where noted, per replicate to obtain a mean and standard deviation).
+All metrics are computed on the pooled set of unique, RDKit-canonicalised SMILES across the 20 production replicates of a given combination (and, where noted, per replicate to obtain a mean and standard deviation), and additionally tracked per RL step to characterise training-time trends rather than only endpoint values.
 
 \begin{itemize}
     \item \textbf{Validity}: the fraction of generated SMILES strings that RDKit can parse.
     \item \textbf{Uniqueness} and \textbf{novelty}: the fraction of valid molecules that are canonically distinct, and the fraction of unique molecules absent from the transfer-learning trainval set, respectively.
     \item \textbf{Internal diversity}: $1$ minus the mean pairwise Tanimoto similarity (Morgan fingerprints, radius 2, 2048 bits) over a 2000-molecule subsample of the unique, valid set.
     \item \textbf{Renormalised score}: $\sqrt{s_\mathrm{pCMC}(x)\cdot s_\mathrm{SurfTen}(x)}$ (Eq.~\ref{eq:composite}), computed from the pCMC/SurfTen component scores that REINVENT4 reports for every molecule regardless of which other terms a given combination's objective includes.
-    Because pCMC and SurfTen are scored identically across all 24 combinations, this provides a common basis for comparison that is isolated from the effect of the plausibility, uncertainty, and Pareto terms under study.
-    \item \textbf{Nearest-neighbour similarity to the training set}: for each generated molecule, the Tanimoto similarity (Morgan fingerprints) to its single closest match in the SurfPro-MD trainval set, averaged over all generated molecules.
-    \item \textbf{SurfPro and ZINC top-100 rediscovery rate}: the fraction of the respective 100-molecule holdout (Section~\ref{sec:methods:holdout}) exactly recovered, by canonical SMILES match, among the unique generated molecules.
+    Because pCMC and SurfTen are scored identically across all combinations, this provides a common basis for comparison that is isolated from the effect of the plausibility, uncertainty, and Pareto terms under study.
+    \item \textbf{Nearest-neighbour Tanimoto distance to the holdout set}: for each generated molecule, $1$ minus the Tanimoto similarity (Morgan fingerprints) to its single closest match in the SurfPro-MD \emph{holdout} set (Section~\ref{sec:methods:holdout}), averaged over all generated molecules -- distinct from novelty/uniqueness above, which are assessed against the trainval set.
+    \item \textbf{SurfPro and ZINC top-$N$ rediscovery rate}: the fraction of the respective holdout (105 molecules for SurfPro, 100 for ZINC; Section~\ref{sec:methods:holdout}) exactly recovered, by canonical SMILES match, among the unique generated molecules.
 \end{itemize}
 
 % =====================================================================
@@ -183,7 +186,7 @@ All metrics are computed on the pooled set of unique, RDKit-canonicalised SMILES
 \section{Results}
 \label{sec:results}
 
-% TODO: populate once the 24-combination production sweep has completed.
+% TODO: populate once the 12-combination production sweep has completed.
 
 % =====================================================================
 % DISCUSSION
