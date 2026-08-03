@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Scatter plots of (predicted) SurfTen vs. pCMC for every generated molecule in
-the 24-combination production sweep, in the surrogate models' native units
-(inverting REINVENT's [0,1] score normalization using the calibration bounds
-in config.json), with the real SurfPro top-100 holdout overlaid as reference.
+Publication-ready SurfTen-vs-pCMC scatter plots for the production sweep,
+restricted to the ZINC-similarity-off, uncertainty-mode in {none, lm}
+combinations (2026-07-31: SM and SM+LM dropped as not effective; ZINC-
+similarity excluded as a plotted dimension). One standalone figure per
+uncertainty mode (no plot/subplot titles), each showing three populations:
+the SurfPro-MD training set, the SurfPro top-100 holdout, and the generated
+molecules (predicted, in the surrogate models' native units, inverting
+REINVENT's [0,1] score normalization using config.json's calibration bounds).
 
 Usage:
     python workflow/make_pcmc_surften_scatter.py \
@@ -18,21 +22,27 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-UNC_ORDER = ["none", "sm", "lm", "sm_lm"]
-UNC_LABELS = {"none": "None", "sm": "SM", "lm": "LM", "sm_lm": "SM+LM"}
+UNC_ORDER = ["none", "lm"]
+UNC_FILENAME = {"none": "scatter_pcmc_surften_unc_none.png", "lm": "scatter_pcmc_surften_unc_lm.png"}
 PARETO_ORDER = ["none", "boost", "gradient"]
-PARETO_LABELS = {"none": "None", "boost": "ParetoBoost", "gradient": "ParetoGradient"}
-ZINC_ORDER = ["on", "off"]
-ZINC_LABELS = {"on": "ZINC-similarity on", "off": "ZINC-similarity off"}
+PARETO_LABELS = {"none": "Generated: no Pareto", "boost": "Generated: ParetoBoost", "gradient": "Generated: ParetoGradient"}
 
-# Validated categorical triplet (dataviz skill palette.md, slots 1-3: blue/orange/
-# aqua) -- the only 3-color subset of that palette confirmed to clear the CVD /
-# normal-vision floors under all-pairs comparison, which a scatter is.
+# dataviz skill categorical palette, slots 1-3 (blue/orange/aqua) -- the only
+# 3-color subset validated all-pairs (CVD + normal-vision) for scatter use.
 COLORS = {"none": "#2a78d6", "boost": "#eb6834", "gradient": "#1baf7a"}
 HOLDOUT_COLOR = "#0b0b0b"
+TRAIN_COLOR = "#898781"
+
+GRIDLINE = "#e1e0d9"
+AXIS_INK = "#c3c2b7"
+MUTED_INK = "#898781"
+PRIMARY_INK = "#0b0b0b"
 
 N_SUBSAMPLE = 1500
 SEED = 0
+
+XLABEL = "SurfTen (arb. units)"
+YLABEL = "pCMC (−log₁₀ mol/L)"
 
 
 def invert_score(score, min_value, max_value, minimize):
@@ -63,37 +73,39 @@ def load_combo_points(combo_dir, bounds, rng):
     return pcmc, surften
 
 
-def make_figure(combos_dir, bounds, holdout, zinc, out_path):
+def style_axes(ax):
+    ax.grid(True, color=GRIDLINE, linewidth=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(AXIS_INK)
+    ax.tick_params(labelsize=9, colors=MUTED_INK)
+    ax.xaxis.label.set_color(PRIMARY_INK)
+    ax.yaxis.label.set_color(PRIMARY_INK)
+
+
+def make_figure(combos_dir, bounds, train_df, holdout_df, unc, out_path):
     rng = np.random.default_rng(SEED)
-    fig, axes = plt.subplots(1, len(UNC_ORDER), figsize=(15, 4), sharex=True, sharey=True)
+    fig, ax = plt.subplots(figsize=(6, 5))
 
-    for col, unc in enumerate(UNC_ORDER):
-        ax = axes[col]
-        ax.scatter(holdout["pCMC"], holdout["SurfTen"], s=22, marker="*",
-                   color=HOLDOUT_COLOR, label="SurfPro top-100 (ground truth)",
-                   zorder=5, linewidths=0)
-        for pareto in PARETO_ORDER:
-            combo_dir = f"{combos_dir}/zinc_{zinc}-unc_{unc}-pareto_{pareto}"
-            pcmc, surften = load_combo_points(combo_dir, bounds, rng)
-            if pcmc is None:
-                continue
-            ax.scatter(pcmc, surften, s=6, alpha=0.35, linewidths=0,
-                       color=COLORS[pareto], label=PARETO_LABELS[pareto])
-        ax.set_title(UNC_LABELS[unc], fontsize=11)
-        ax.set_xlabel("pCMC (predicted)", fontsize=9)
-        ax.grid(True, color="#e1e0d9", linewidth=0.6, zorder=0)
-        ax.set_axisbelow(True)
-        for spine in ("top", "right"):
-            ax.spines[spine].set_visible(False)
-        ax.tick_params(labelsize=8)
-    axes[0].set_ylabel("SurfTen (predicted)", fontsize=9)
+    ax.scatter(train_df["SurfTen"], train_df["pCMC"], s=8, alpha=0.5, linewidths=0,
+               color=TRAIN_COLOR, label="Training set", zorder=2)
+    ax.scatter(holdout_df["SurfTen"], holdout_df["pCMC"], s=28, marker="*",
+               color=HOLDOUT_COLOR, label="Holdout test set", zorder=5, linewidths=0)
+    for pareto in PARETO_ORDER:
+        combo_dir = f"{combos_dir}/zinc_off-unc_{unc}-pareto_{pareto}"
+        pcmc, surften = load_combo_points(combo_dir, bounds, rng)
+        if pcmc is None:
+            continue
+        ax.scatter(surften, pcmc, s=6, alpha=0.35, linewidths=0,
+                   color=COLORS[pareto], label=PARETO_LABELS[pareto], zorder=3)
 
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=4, fontsize=9,
-               bbox_to_anchor=(0.5, -0.08), markerscale=2, frameon=False)
-    fig.suptitle(f"{ZINC_LABELS[zinc]} -- lower SurfTen & higher pCMC is better "
-                 "(bottom-right)", fontsize=11, y=1.03)
-    fig.tight_layout(rect=(0, 0.02, 1, 1))
+    ax.set_xlabel(XLABEL)
+    ax.set_ylabel(YLABEL)
+    style_axes(ax)
+    ax.legend(frameon=False, fontsize=9, loc="best", markerscale=2)
+    fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"saved -> {out_path}")
@@ -103,6 +115,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--combos-dir", default="runs/production")
     ap.add_argument("--config", default="config.json")
+    ap.add_argument("--train-csv", default="data/surfpro_expanded_trainval_only.csv")
     ap.add_argument("--surfpro-holdout", default="data/surfpro_real_holdout_test_split.csv")
     ap.add_argument("--out-dir", default="figures")
     args = ap.parse_args()
@@ -116,11 +129,12 @@ def main():
         "SurfTen": (sf["SurfTen"]["min_value"], sf["SurfTen"]["max_value"], sf["SurfTen"]["minimize"]),
     }
 
-    holdout = pd.read_csv(args.surfpro_holdout, usecols=["pCMC", "SurfTen"]).dropna()
+    train_df = pd.read_csv(args.train_csv, usecols=["pCMC", "SurfTen"]).dropna()
+    holdout_df = pd.read_csv(args.surfpro_holdout, usecols=["pCMC", "SurfTen"]).dropna()
 
-    for zinc in ZINC_ORDER:
-        make_figure(args.combos_dir, bounds, holdout, zinc,
-                    f"{args.out_dir}/pcmc_surften_scatter_zinc_{zinc}.png")
+    for unc in UNC_ORDER:
+        make_figure(args.combos_dir, bounds, train_df, holdout_df, unc,
+                    f"{args.out_dir}/{UNC_FILENAME[unc]}")
 
 
 if __name__ == "__main__":

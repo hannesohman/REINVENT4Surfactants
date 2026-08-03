@@ -1432,9 +1432,53 @@ resume-from-cache logic picked up exactly where it left off. Results below.
 
 ### Results (re-run with the corrected holdout)
 
-![Renormalized score, SurfPro/ZINC top-100 rediscovery, and NN-Tanimoto similarity across all 24 combinations](figures/production_sweep_scores.png)
+**2026-07-31: SM and SM+LM dropped.** Across the marginal-effects analysis
+below, SM and SM+LM never beat plain `none`/LM on renormalized score and
+didn't add a clearly distinct qualitative pattern beyond what LM already
+shows -- so subsequent figures keep only the `none` and `LM` uncertainty
+modes (and remain ZINC-similarity-off only, per the earlier decision). The
+aggregate numbers for SM/SM+LM from the full 24-combination sweep are kept
+below for the record, but are no longer carried forward into new figures.
 
-![Novelty, internal diversity, and validity across all 24 combinations](figures/production_sweep_diversity.png)
+`workflow/make_production_stepwise_figures.py` plots renormalized score,
+validity, novelty, internal diversity, and nearest-neighbor Tanimoto
+*distance to the SurfPro top-100 holdout* (not the training set) as a
+function of RL step. Each is its own publication-ready figure (no plot/
+subplot titles; gridlines; shaded +/-1 std bands across the 5 replicates;
+axis labels with units where applicable): color encodes Pareto mode, line
+style encodes uncertainty mode (solid = none, dashed = LM).
+
+![Renormalized score vs. RL step](figures/stepwise_renormalized_score.png)
+
+![Validity vs. RL step](figures/stepwise_validity.png)
+
+![Novelty vs. RL step](figures/stepwise_novelty.png)
+
+![Internal diversity vs. RL step](figures/stepwise_internal_diversity.png)
+
+![Nearest-neighbor Tanimoto distance to the holdout set vs. RL step](figures/stepwise_tanimoto_dist_holdout.png)
+
+**The score/diversity trade-off is a genuine training-time collapse, not
+just an endpoint difference.** Every panel shows renormalized score rising
+and internal diversity + novelty falling as RL progresses -- the standard
+exploration/exploitation signature -- but the *rate* of that collapse
+differs sharply by uncertainty mode. Loss Modulation (LM) shows by far the
+steepest diversity collapse of any mode, falling from ~0.77 to as low as
+0.2-0.4 by step 20 depending on the Pareto arm; Score Modulation (SM) barely
+loses diversity at all over the full 20 steps (staying in 0.71-0.77
+throughout). This directly explains the aggregate finding that LM has the
+lowest marginal diversity and SM the highest: LM's low endpoint diversity is
+the result of an active, ongoing collapse during training, not a static
+property of its optimum.
+
+**Pareto-mode differentiation grows over training rather than being present
+from the start.** In the SM panel, ParetoGradient's renormalized-score
+advantage over ParetoBoost/none is negligible for the first ~5 steps and
+only widens into a large gap (0.47 vs. ~0.40) by step 20 -- a pattern the
+single-endpoint bar charts couldn't show. Novelty and holdout-distance track
+the same shape as diversity (rising/falling together), consistent with all
+three being facets of the same exploration-exhaustion process rather than
+independent effects.
 
 **SurfPro top-100 rediscovery is now at floor everywhere (0.0-0.5%),** as it
 should be for a genuinely disjoint holdout: with only 20 RL steps and 5
@@ -1484,18 +1528,80 @@ is pushing the surrogate objective as hard as possible or generating a
 broader, more literature-similar set of candidates.
 
 **Property-space overlap remains strong despite near-zero exact rediscovery.**
-The pCMC/SurfTen scatter plots below (predicted values, real units, SurfPro
-top-100 holdout overlaid as black stars) show the generated clouds
-substantially overlapping the true top-100's property region in every
-combination, even though essentially none of the exact molecules are
-recovered -- the model is learning to produce property-good molecules
-broadly, not memorizing/copying specific structures, which is the intended
-behavior once homolog leakage is removed.
+`workflow/make_pcmc_surften_scatter.py` plots SurfTen (x-axis) against pCMC
+(y-axis, predicted values in the surrogate models' native units), one
+publication-ready figure per uncertainty mode (`none`/LM; ZINC-similarity-off
+only), each overlaying three populations: the SurfPro-MD training set (grey),
+the SurfPro top-100 holdout test set (black stars), and the generated
+molecules from all three Pareto arms (colored). The generated clouds
+substantially overlap the true top-100's property region in both modes, even
+though essentially none of the exact molecules are recovered -- the model is
+learning to produce property-good molecules broadly, not memorizing/copying
+specific structures, which is the intended behavior once homolog leakage is
+removed.
 
-![SurfTen vs pCMC, ZINC-similarity on](figures/pcmc_surften_scatter_zinc_on.png)
+![SurfTen vs pCMC, uncertainty mode: none](figures/scatter_pcmc_surften_unc_none.png)
 
-![SurfTen vs pCMC, ZINC-similarity off](figures/pcmc_surften_scatter_zinc_off.png)
+![SurfTen vs pCMC, uncertainty mode: LM](figures/scatter_pcmc_surften_unc_lm.png)
 
 Full per-combination numbers (including per-replicate values and best HPO
 hyperparameters) are in `runs/production/comparison_table.csv` and the
 individual `runs/production/<combo>/final_result.json` files.
+
+### Findings (2026-08-03): HPO's batch-size preference was an objective artifact; fixed, plus more replicates and a Pareto-component efficiency fix
+
+Every HPO-tuned combination in the `none`/LM sweep independently converged on
+`batch_size=512`, the ceiling of the `{64,128,256,512}` search space. The
+explanation was in the objective itself, not genuine training dynamics:
+
+```python
+top_k = df.sort_values("Score", ascending=False).head(100)  # workflow/run_production_combo.py
+```
+
+`df` is every molecule generated across the whole trial, so it scales
+directly with batch size (1,280 molecules at batch=64 vs. 10,240 at
+batch=512, for the same 20 steps). Taking a *fixed* top-100 out of an
+increasingly larger pool is an increasingly extreme order statistic --
+mechanically inflating the objective for larger batches via basic
+extreme-value statistics, regardless of whether the underlying policy is
+actually better. That every one of 6 independently-tuned combinations (with
+otherwise very different sigma/learning-rate values) landed on the same
+ceiling is much better explained by this structural bias than by 6
+coincidentally-identical genuine preferences.
+
+**Fix: percentile objective + oracle-budget/batch-size decoupling.** The HPO
+objective is now the mean score of the top **5%** of generated molecules
+(scales with the pool instead of being a fixed count), and the batch-size
+search space changed to `{10, 50, 100, 200, 500}` with the step count
+derived per trial as a **fixed oracle budget** (10,000 proposed molecules)
+divided by that trial's batch size -- so every trial/replicate proposes the
+same total number of molecules no matter how it's split between batch size
+and step count. Replicate count also increased from 5 to 20 to shrink the
+error bars in the step-wise figures above.
+
+**A real efficiency risk this exposed, and its fix.** Coupling steps to
+`10000/batch_size` means `batch_size=10` runs for 1,000 steps. The
+`ParetoBoost`/`ParetoGradient` components re-read and re-sorted their *entire*
+run history from disk on every single step:
+
+```python
+previous_df = pd.read_csv(self.data_path)   # whole growing CSV, every step
+pareto_df = find_pareto_front(previous_df)  # full sort of all rows so far
+```
+
+Total work across a run scales as `O(steps^2 x batch)`; since `steps =
+10000/batch`, the *total* per-run overhead from this alone scales as
+`O(steps)` -- i.e. inversely with batch size, so batch=10 would do roughly
+50x more of this than batch=500. Fixed (2026-08-03) by keeping an in-memory
+running Pareto front on the component instance instead: since a dominated
+point can never re-enter the front later (points are only ever added), each
+new batch only needs checking against the *current* (small) front, then
+folding into it via `find_pareto_front(front U new_batch)` -- a sort over
+`|front| + batch_size` rows, not the full history. Verified algorithmically
+equivalent to the old full-recomputation approach via a 30-step synthetic
+test (0 mismatches) before deploying, then smoke-tested with a real short
+`staged_learning` run.
+
+The 12-combination re-run (2 ZINC x 2 uncertainty x 3 Pareto, with these
+fixes) was in progress as of this write-up; this section will be updated
+with final numbers once it completes.

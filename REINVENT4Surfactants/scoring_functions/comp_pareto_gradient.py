@@ -295,36 +295,34 @@ class ParetoGradient:
         self.max_score = parameters.max_score[0]
         self.distance_exponent = parameters.distance_exponent[0]
 
+        # In-memory running Pareto front, updated incrementally each step
+        # instead of re-reading and re-sorting the whole run history from
+        # disk every call (found 2026-08-03: that made total per-run cost
+        # scale as O(steps^2), i.e. inversely with batch size once steps is
+        # tied to a fixed oracle-call budget). A dominated point can never
+        # re-enter the front later (points are only ever added, never
+        # removed), so each new batch only needs to be checked against the
+        # current (small) front -- never the full history. None = not yet
+        # bootstrapped for this process.
+        self._front = None
 
-    def __call__(self, smiles: list[str]) -> ComponentResults:
-        print(f"[ParetoGradient] Loading previous data from {self.data_path}")
-
+    def _bootstrap_front(self) -> pd.DataFrame:
+        """One-time reconstruction of the front from any pre-existing history
+        on disk (e.g. resuming a run), so correctness doesn't depend on
+        whether this process has seen every step from the start."""
         if not Path(self.data_path).is_file() or os.stat(self.data_path).st_size == 0:
-            print(f"[ParetoGradient] No previous data found at {self.data_path}, returning max score of {self.max_score} for all molecules.")
-            score = np.full(len(smiles), self.max_score)
-            return ComponentResults([score])
-        
+            return pd.DataFrame(columns=["SurfTen", "pCMC"])
         previous_df = pd.read_csv(self.data_path)
-
-        # The values in the SurfTen and pCMC columns are inverted because they were used for scoring.
-        # We need to un-invert them to compute the correct Pareto front.
         previous_df["SurfTen"] = 1 - previous_df["SurfTen"]
         previous_df["pCMC"] = 1 - previous_df["pCMC"]
+        return find_pareto_front(previous_df)[["SurfTen", "pCMC"]].reset_index(drop=True)
 
-        pareto_df = find_pareto_front(previous_df)
+    def __call__(self, smiles: list[str]) -> ComponentResults:
+        if self._front is None:
+            self._front = self._bootstrap_front()
+            print(f"[ParetoGradient] Bootstrapped front with {len(self._front)} point(s)")
 
-        if len(pareto_df) < 3:
-            # find_closest_point_on_line needs at least 3 Pareto points to
-            # define line segments (left/middle/right edge cases) -- with few
-            # RL steps/small batches the front can still be this sparse.
-            # Falls back the same way as "no previous data yet" (2026-07-27,
-            # first hit while smoke-testing this never-before-used component).
-            print(
-                f"[ParetoGradient] Pareto front has only {len(pareto_df)} point(s), "
-                f"need >=3; returning max score of {self.max_score} for all molecules."
-            )
-            score = np.full(len(smiles), self.max_score)
-            return ComponentResults([score])
+        pareto_df = self._front
 
         surften_predictions = run_prediction(smiles, self.SurfTen_model_path)
         surften_predictions = normalize(surften_predictions, self.SurfTen_min_value, self.SurfTen_max_value)
@@ -347,11 +345,28 @@ class ParetoGradient:
             "pCMC": pcmc_predictions
         })
 
-        smiles_df = find_closest_pareto_point(smiles_df, pareto_df)
-        smiles_df = find_closest_point_on_line(smiles_df, pareto_df)
-        smiles_df = score_points(smiles_df, pareto_df, exponent=self.distance_exponent)
+        if len(pareto_df) < 3:
+            # find_closest_point_on_line needs at least 3 Pareto points to
+            # define line segments (left/middle/right edge cases) -- with few
+            # RL steps/small batches the front can still be this sparse.
+            # Falls back the same way as "no previous data yet" (2026-07-27,
+            # first hit while smoke-testing this never-before-used component).
+            print(
+                f"[ParetoGradient] Pareto front has only {len(pareto_df)} point(s), "
+                f"need >=3; returning max score of {self.max_score} for all molecules."
+            )
+            score = np.full(len(smiles), self.max_score)
+        else:
+            scored_df = find_closest_pareto_point(smiles_df.copy(), pareto_df)
+            scored_df = find_closest_point_on_line(scored_df, pareto_df)
+            scored_df = score_points(scored_df, pareto_df, exponent=self.distance_exponent)
+            score = scored_df["score"].to_numpy()
 
-        score = smiles_df["score"].to_numpy()
+        # Fold this step's points into the running front -- a dominated point
+        # never needs reconsidering, so this is the only history the next
+        # call needs (cheap: O((|front| + batch_size) log(...))).
+        combined = pd.concat([self._front, smiles_df[["SurfTen", "pCMC"]]], ignore_index=True)
+        self._front = find_pareto_front(combined)[["SurfTen", "pCMC"]].reset_index(drop=True)
 
         return ComponentResults([score])
 

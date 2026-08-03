@@ -101,38 +101,34 @@ class ParetoBoost:
         self.boost_factor = parameters.boost_factor[0]
         self.skip = parameters.skip[0]
 
-    def __call__(self, smiles: list[str]) -> ComponentResults:
-        print(f"[ParetoBoost] Loading previous data from {self.data_path}")
+        # In-memory running Pareto front, updated incrementally each step
+        # instead of re-reading and re-sorting the whole run history from
+        # disk every call (found 2026-08-03: that made total per-run cost
+        # scale as O(steps^2), i.e. inversely with batch size once steps is
+        # tied to a fixed oracle-call budget). A dominated point can never
+        # re-enter the front later (points are only ever added, never
+        # removed), so each new batch only needs to be checked against the
+        # current (small) front -- never the full history. None = not yet
+        # bootstrapped for this process.
+        self._front = None
 
+    def _bootstrap_front(self) -> pd.DataFrame:
+        """One-time reconstruction of the front from any pre-existing history
+        on disk (e.g. resuming a run), so correctness doesn't depend on
+        whether this process has seen every step from the start."""
         if not Path(self.data_path).exists() or os.path.getsize(self.data_path) == 0:
-            print(f"[ParetoBoost] No previous data found at {self.data_path}, returning default zero scores")
-            score = np.zeros(len(smiles))
-            return ComponentResults([score])
-
+            return pd.DataFrame(columns=["SurfTen", "pCMC"])
         previous_df = pd.read_csv(self.data_path)
-        print(f"[ParetoBoost] Loaded previous data with {len(previous_df)} entries")
-
-        # SurfTen and pCMC are inverted in the previous data since they are used for scoring, 
-        # so we need to invert them back to their original normalized values before finding the pareto front
         previous_df["SurfTen"] = 1 - previous_df["SurfTen"]
         previous_df["pCMC"] = 1 - previous_df["pCMC"]
+        return find_pareto_front(previous_df)[["SurfTen", "pCMC"]].reset_index(drop=True)
 
+    def __call__(self, smiles: list[str]) -> ComponentResults:
+        if self._front is None:
+            self._front = self._bootstrap_front()
+            print(f"[ParetoBoost] Bootstrapped front with {len(self._front)} point(s)")
 
-        # Find the points on the preto front from the previous data
-        pareto_df = find_pareto_front(previous_df)
-        print(f"Length of pareto front: {len(pareto_df)}")
-
-
-        # Save the pareto front points to a new csv file for visualization
-        time_id = str(int(time.time()))[-6:]
-        multiple_folder = Path(self.data_path).parent
-        pareto_folder = multiple_folder / "pareto"
-        pareto_folder.mkdir(exist_ok=True)
-
-        pareto_file = pareto_folder / f"pareto_front_{time_id}.csv"
-        # print(pareto_file.name)
-        pareto_df.to_csv(pareto_file, index=False)
-
+        pareto_df = self._front
 
         # Predict the scores for the new SMILES
         surften_predictions = run_prediction(smiles, self.SurfTen_model_path)
@@ -157,31 +153,46 @@ class ParetoBoost:
             "boost": None
         })
 
-        #Create a mask for all points that are lower and more left than the pareto front, and set their boost to True
+        if pareto_df.empty:
+            print("[ParetoBoost] Front is empty (first step), returning default zero scores")
+            score = np.zeros(len(smiles))
+        else:
+            #Create a mask for all points that are lower and more left than the pareto front, and set their boost to True
 
-        pareto_coords = pareto_df[["SurfTen", "pCMC"]].to_numpy()
-        smiles_coords = smiles_df[["SurfTen", "pCMC"]].to_numpy()
+            pareto_coords = pareto_df[["SurfTen", "pCMC"]].to_numpy()
+            smiles_coords = smiles_df[["SurfTen", "pCMC"]].to_numpy()
 
-        left_mask = smiles_coords[:, 0][:, None] <= pareto_coords[0][0]
-        below_mask = smiles_coords[:, 1][:, None] <= pareto_coords[-1][1]
-        boost_mask = left_mask | below_mask
+            left_mask = smiles_coords[:, 0][:, None] <= pareto_coords[0][0]
+            below_mask = smiles_coords[:, 1][:, None] <= pareto_coords[-1][1]
+            boost_mask = left_mask | below_mask
 
-        for idx in range(len(pareto_df)-2):
-            a_coords = pareto_coords[idx]
-            b_coords = pareto_coords[idx+1]
+            for idx in range(len(pareto_df)-2):
+                a_coords = pareto_coords[idx]
+                b_coords = pareto_coords[idx+1]
 
-            mask = ((smiles_coords[:, 1][:, None] <= a_coords[1]) & (smiles_coords[:, 0][:, None] <= b_coords[0]))
-            boost_mask = boost_mask | mask
+                mask = ((smiles_coords[:, 1][:, None] <= a_coords[1]) & (smiles_coords[:, 0][:, None] <= b_coords[0]))
+                boost_mask = boost_mask | mask
 
+            smiles_df["boost"] = boost_mask.any(axis=1)
 
-        smiles_df["boost"] = boost_mask.any(axis=1)
-        print(smiles_df)
+            n_to_boost = smiles_df["boost"].sum()
+            print(f"[ParetoBoost] Boosting {n_to_boost} molecules (front size {len(pareto_df)})")
 
-        n_to_boost = smiles_df["boost"].sum()
-        print(f"[ParetoBoost] Boosting {n_to_boost} molecules")
+            score = np.array(smiles_df["boost"]).astype(float)
+            score = score * self.boost_factor + self.base_score
 
-        score = np.array(smiles_df["boost"]).astype(float)
-        score = score * self.boost_factor + self.base_score
+        # Fold this step's points into the running front -- a dominated point
+        # never needs reconsidering, so this is the only history the next
+        # call needs (cheap: O((|front| + batch_size) log(...))).
+        combined = pd.concat([self._front, smiles_df[["SurfTen", "pCMC"]]], ignore_index=True)
+        self._front = find_pareto_front(combined)[["SurfTen", "pCMC"]].reset_index(drop=True)
+
+        # Save the (now small) front for visualization, same as before.
+        time_id = str(int(time.time()))[-6:]
+        multiple_folder = Path(self.data_path).parent
+        pareto_folder = multiple_folder / "pareto"
+        pareto_folder.mkdir(exist_ok=True)
+        self._front.to_csv(pareto_folder / f"pareto_front_{time_id}.csv", index=False)
 
         return ComponentResults([score])
 

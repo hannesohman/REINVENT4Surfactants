@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Single-combination driver for the 2026-07-27 production sweep:
-2 (ZINC-plausibility on/off) x 4 (uncertainty mode: none/sm/lm/sm_lm) x
-3 (Pareto: none/boost/gradient) = 24 combinations. For one combination:
+Single-combination driver for the production sweep. As of 2026-08-03: ZINC-
+plausibility on/off x uncertainty mode in {none, lm} (SM/SM+LM dropped as not
+effective) x Pareto mode {none/boost/gradient}. For one combination:
 
 1. Build that combo's scoring_functions + per-component weights (equal
    1/n_active across whichever of pCMC, SurfTen, pCMC_Uncertainty +
@@ -11,24 +11,28 @@ Single-combination driver for the 2026-07-27 production sweep:
    weight=0 so the LM patch can read their raw scores without them entering
    Score Modulation) and whether REINVENT_LM_ENABLED should be set.
 2. Run an Optuna sweep (sigma/learning_rate/batch_size) maximizing mean
-   top-100 `Score` -- never the rediscovery/holdout metrics (see README).
-3. Run N production replicates at the best hyperparameters.
+   top-5% `Score` -- never the rediscovery/holdout metrics (see README).
+   batch_size is searched over {10, 50, 100, 200, 500}; step count is
+   derived per trial as a fixed --oracle-budget (default 10000) divided by
+   that trial's batch_size, so every trial proposes the same total number of
+   molecules regardless of how it's split into batches/steps.
+3. Run N production replicates at the best hyperparameters (same
+   oracle-budget/batch_size -> steps rule).
 4. Evaluate with the full metric suite (validity, novelty, diversity,
    renormalized_score, nn_tanimoto_to_train, SurfPro/ZINC top-100
    rediscovery), per-replicate and pooled.
 
 Storage: each RL run (HPO trial or production replicate) writes an ~85MB
-model checkpoint. With 24 combos x 20 runs each that's 40+ GB if left in
-place, so `checkpoints/`+`tb_logdir/` are deleted immediately after each run
-(trial_1.csv/eval.json, which the resume-from-cache logic actually needs, are
-kept).
+model checkpoint, so `checkpoints/`+`tb_logdir/` are deleted immediately
+after each run (trial_1.csv/eval.json, which the resume-from-cache logic
+actually needs, are kept).
 
 Usage:
     python workflow/run_production_combo.py \
-        --zinc on --unc-mode sm --pareto-mode none \
+        --zinc on --unc-mode lm --pareto-mode none \
         --tl-model runs/validation/tl_only_.../generation_0/model/generation_0.model \
-        --out-dir runs/production/zinc_on-unc_sm-pareto_none \
-        --hpo-trials 15 --replicates 5 --steps 20
+        --out-dir runs/production/zinc_on-unc_lm-pareto_none \
+        --hpo-trials 15 --replicates 20 --oracle-budget 10000
 """
 import argparse
 import json
@@ -118,7 +122,12 @@ def cleanup_run_dir(run_dir: Path):
 def run_hpo_trial(trial: optuna.Trial, args, scoring_functions, weights, env, hpo_dir) -> float:
     sigma = trial.suggest_int("sigma", 50, 500, log=True)
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
+    batch_size = trial.suggest_categorical("batch_size", [10, 50, 100, 200, 500])
+    # Fixed oracle-call (proposed-molecule) budget per run, regardless of how
+    # it's split between batch size and step count (2026-08-03): keeps HPO
+    # trials and production replicates comparable in total compute/oracle
+    # calls across the whole batch-size search space.
+    steps = max(1, args.oracle_budget // batch_size)
 
     trial_dir = Path(hpo_dir) / f"trial_{trial.number:03d}"
     trial_dir.mkdir(parents=True, exist_ok=True)
@@ -127,7 +136,7 @@ def run_hpo_trial(trial: optuna.Trial, args, scoring_functions, weights, env, hp
 
     toml_text = make_toml(
         trial_dir, args.tl_model, args.prior_file, sigma, learning_rate,
-        batch_size, args.steps, args.seed,
+        batch_size, steps, args.seed,
         scoring_functions=scoring_functions, weights=weights,
     )
     toml_path = trial_dir / "trial.toml"
@@ -145,10 +154,16 @@ def run_hpo_trial(trial: optuna.Trial, args, scoring_functions, weights, env, hp
 
     csv_path = trial_dir / "trial_1.csv"
     df = pd.read_csv(csv_path)
-    top_k = df.sort_values("Score", ascending=False).head(100)
+    # Top-5% by percentile, not a fixed top-100 count: a fixed count biases
+    # the objective toward whichever batch_size generates the largest pool
+    # (more molecules to mine the tail from is a bigger apparent improvement
+    # even with an unchanged underlying score distribution -- found
+    # 2026-08-03, see README). A percentile cut scales with the pool instead.
+    n_top = max(1, round(len(df) * 0.05))
+    top_k = df.sort_values("Score", ascending=False).head(n_top)
     value = float(top_k["Score"].mean())
-    print(f"[hpo trial {trial.number}] sigma={sigma} lr={learning_rate:.2e} batch={batch_size} "
-          f"-> mean_top100_score={value:.4f}", flush=True)
+    print(f"[hpo trial {trial.number}] sigma={sigma} lr={learning_rate:.2e} batch={batch_size} steps={steps} "
+          f"-> mean_top5pct_score={value:.4f} (n_top={n_top}/{len(df)})", flush=True)
 
     cleanup_run_dir(trial_dir)
     return value
@@ -163,8 +178,9 @@ def main():
     ap.add_argument("--prior-file", default="models/pubchem20250312.prior.12.chkpt")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--hpo-trials", type=int, default=15)
-    ap.add_argument("--replicates", type=int, default=5)
-    ap.add_argument("--steps", type=int, default=20)
+    ap.add_argument("--replicates", type=int, default=20)
+    ap.add_argument("--oracle-budget", type=int, default=10000,
+                     help="fixed proposed-molecule budget per run; steps = oracle_budget // batch_size")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--train-csv", default="data/surfpro_expanded_trainval_only.csv")
     ap.add_argument("--train-smiles-col", default="SMILES_canonical")
@@ -210,9 +226,10 @@ def main():
         print("No HPO trials completed successfully -- aborting this combo.", file=sys.stderr)
         sys.exit(1)
     best_params = study.best_params
-    print(f"=== BEST HPO PARAMS: {best_params}  (value={study.best_value:.4f}) ===", flush=True)
+    best_steps = max(1, args.oracle_budget // best_params["batch_size"])
+    print(f"=== BEST HPO PARAMS: {best_params}  steps={best_steps}  (value={study.best_value:.4f}) ===", flush=True)
     with open(out_dir / "best_hpo_params.json", "w") as f:
-        json.dump({"best_params": best_params, "best_value": study.best_value}, f, indent=2)
+        json.dump({"best_params": best_params, "best_value": study.best_value, "steps": best_steps}, f, indent=2)
 
     # --- 2. Production replicates at best hyperparameters ---
     print("loading fixed-cost eval resources...", flush=True)
@@ -239,7 +256,7 @@ def main():
         else:
             if not csv_path.exists():
                 csv_path_result = run_replicate(
-                    rep_dir, best_params, i, args.tl_model, args.prior_file, args.steps,
+                    rep_dir, best_params, i, args.tl_model, args.prior_file, best_steps,
                     scoring_functions=scoring_functions, weights=weights, env=env,
                 )
                 if csv_path_result is None:
