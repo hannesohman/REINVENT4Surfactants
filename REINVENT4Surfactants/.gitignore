@@ -6,6 +6,11 @@ runs/*
 # Raw bulk ZINC download (~1.2GB, reproducible via README's "ZINC in-stock pull" step)
 data/ZINC/
 
+# ChEMBL InChIKey reference cache (~94MB, reproducible via
+# workflow/build_chembl_reference.py)
+data/chembl_reference.json.gz
+data/chembl_chemreps.txt.gz
+
 # Local-only visualization outputs (README documents these as not published anywhere)
 /pCMC_vs_SurfTen_current_state.png
 /pcmc_surften_scatter.png
