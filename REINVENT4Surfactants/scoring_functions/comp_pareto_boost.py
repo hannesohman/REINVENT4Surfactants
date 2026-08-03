@@ -117,11 +117,11 @@ class ParetoBoost:
         on disk (e.g. resuming a run), so correctness doesn't depend on
         whether this process has seen every step from the start."""
         if not Path(self.data_path).exists() or os.path.getsize(self.data_path) == 0:
-            return pd.DataFrame(columns=["SurfTen", "pCMC"])
+            return pd.DataFrame(columns=["SurfTen", "pCMC"], dtype=float)
         previous_df = pd.read_csv(self.data_path)
         previous_df["SurfTen"] = 1 - previous_df["SurfTen"]
         previous_df["pCMC"] = 1 - previous_df["pCMC"]
-        return find_pareto_front(previous_df)[["SurfTen", "pCMC"]].reset_index(drop=True)
+        return find_pareto_front(previous_df)[["SurfTen", "pCMC"]].astype(float).reset_index(drop=True)
 
     def __call__(self, smiles: list[str]) -> ComponentResults:
         if self._front is None:
@@ -185,7 +185,7 @@ class ParetoBoost:
         # never needs reconsidering, so this is the only history the next
         # call needs (cheap: O((|front| + batch_size) log(...))).
         combined = pd.concat([self._front, smiles_df[["SurfTen", "pCMC"]]], ignore_index=True)
-        self._front = find_pareto_front(combined)[["SurfTen", "pCMC"]].reset_index(drop=True)
+        self._front = find_pareto_front(combined)[["SurfTen", "pCMC"]].astype(float).reset_index(drop=True)
 
         # Save the (now small) front for visualization, same as before.
         time_id = str(int(time.time()))[-6:]
