@@ -1602,6 +1602,10 @@ equivalent to the old full-recomputation approach via a 30-step synthetic
 test (0 mismatches) before deploying, then smoke-tested with a real short
 `staged_learning` run.
 
-The 12-combination re-run (2 ZINC x 2 uncertainty x 3 Pareto, with these
-fixes) was in progress as of this write-up; this section will be updated
-with final numbers once it completes.
+This re-run was initially submitted as 12 combinations (2 ZINC x 2 uncertainty
+x 3 Pareto) before ZINC-similarity was also dropped as a varied dimension
+(not just excluded from plots, as decided earlier) -- the 6 ZINC-on jobs were
+cancelled and their outputs discarded, leaving a 6-combination re-run
+(ZINC-similarity off x 2 uncertainty x 3 Pareto, with the fixes above) in
+progress as of this write-up; this section will be updated with final
+numbers once it completes.
