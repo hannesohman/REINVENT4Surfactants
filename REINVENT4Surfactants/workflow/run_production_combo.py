@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Single-combination driver for the production sweep. As of 2026-08-03: ZINC-
-plausibility on/off x uncertainty mode in {none, lm} (SM/SM+LM dropped as not
-effective) x Pareto mode {none/boost/gradient}. For one combination:
+Single-combination driver for the production sweep. As of 2026-08-03:
+ZINC-similarity fixed off (dropped as a varied dimension) x uncertainty mode
+in {none, lm} (SM/SM+LM dropped as not effective) x Pareto mode
+{none/boost/gradient} -- 6 combinations. The --zinc flag still exists for
+flexibility but only "off" is used in the current sweep. For one combination:
 
 1. Build that combo's scoring_functions + per-component weights (equal
    1/n_active across whichever of pCMC, SurfTen, pCMC_Uncertainty +

@@ -1602,6 +1602,44 @@ equivalent to the old full-recomputation approach via a 30-step synthetic
 test (0 mismatches) before deploying, then smoke-tested with a real short
 `staged_learning` run.
 
-The 12-combination re-run (2 ZINC x 2 uncertainty x 3 Pareto, with these
-fixes) was in progress as of this write-up; this section will be updated
-with final numbers once it completes.
+This re-run was initially submitted as 12 combinations (2 ZINC x 2 uncertainty
+x 3 Pareto) before ZINC-similarity was also dropped as a varied dimension
+(not just excluded from plots, as decided earlier) -- the 6 ZINC-on jobs were
+cancelled and their outputs discarded, leaving a 6-combination re-run
+(ZINC-similarity off x 2 uncertainty x 3 Pareto, with the fixes above) in
+progress as of this write-up; this section will be updated with final
+numbers once it completes.
+
+### ChEMBL membership check (`workflow/build_chembl_reference.py`, `workflow/check_chembl_membership.py`)
+
+A third rediscovery-style sanity check, independent of the SurfPro/ZINC ones
+above: are the top-N% highest-scoring generated molecules (same percentile
+convention as the HPO objective) already known compounds in ChEMBL, rather
+than genuinely novel structures? `build_chembl_reference.py` downloads
+ChEMBL's "chemical representations" file (canonical SMILES + InChI/InChIKey
+per compound; ChEMBL release 37 as of this writing, ~290MB compressed --
+much smaller than the full relational database, since only identity lookup
+is needed) and caches just the InChIKey set (2{,}897{,}819 compounds as of
+release 37) plus a skeleton-level set (first 14 characters of the InChIKey,
+i.e. connectivity only, ignoring stereochemistry/tautomer/salt state) to
+`data/chembl_reference.json.gz` (~94MB, gitignored, reproducible via the
+build script). `check_chembl_membership.py` then pools any set of generated
+CSVs, takes the top-N% by `Score`, computes each candidate's InChIKey via
+RDKit, and reports both exact (full InChIKey) and skeleton-only matches --
+the skeleton check matters here since generated SMILES carry no
+stereochemistry and many ChEMBL entries are salts of the compound REINVENT
+would generate as the free form.
+
+```bash
+python workflow/build_chembl_reference.py --out-dir data   # once
+python workflow/check_chembl_membership.py \
+    --generated "runs/production/<combo>/production/rep_*/trial_1.csv" \
+    --top-pct 5 --chembl-reference data/chembl_reference.json.gz
+```
+
+Smoke-tested against a completed HPO trial's output (438 top-5% molecules
+out of 8766 unique valid ones): 0 exact and 0 skeleton-only ChEMBL matches --
+plausible given surfactants are a structurally distinct, largely
+non-bioactive chemical class from ChEMBL's mostly drug-like/bioactive
+compound set, but worth re-running against the final production replicates
+once the sweep completes.

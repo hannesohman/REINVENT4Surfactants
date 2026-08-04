@@ -1,9 +1,10 @@
 #!/bin/bash
 # Generates and submits one sbatch job per combination of the production
-# sweep: 2 (ZINC) x 2 (uncertainty mode: none/lm -- SM/SM+LM dropped
-# 2026-08-03 as not effective) x 3 (Pareto) = 12 jobs. Each job is
+# sweep: ZINC-similarity off only (2026-08-03: dropped as a varied dimension,
+# not just excluded from plots) x 2 (uncertainty mode: none/lm -- SM/SM+LM
+# dropped 2026-08-03 as not effective) x 3 (Pareto) = 6 jobs. Each job is
 # self-contained (its own Optuna HPO sweep + production replicates +
-# evaluation), so all 12 can run in parallel as SLURM schedules GPUs.
+# evaluation), so all 6 can run in parallel as SLURM schedules GPUs.
 #
 # batch_size is searched over {10,50,100,200,500}; step count is derived per
 # trial/replicate as a fixed oracle budget (10000 proposed molecules) divided
@@ -24,7 +25,7 @@ WALLTIME="24:00:00"
 
 mkdir -p "$JOBS_DIR" "$OUT_BASE"
 
-for zinc in on off; do
+for zinc in off; do
   for unc in none lm; do
     for pareto in none boost gradient; do
       name="zinc_${zinc}-unc_${unc}-pareto_${pareto}"
