@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Publication-ready SurfTen-vs-pCMC scatter plots for the production sweep,
+Publication-ready SurfTen-vs-pCMC scatter figure for the production sweep,
 restricted to the ZINC-similarity-off, uncertainty-mode in {none, lm}
 combinations (2026-07-31: SM and SM+LM dropped as not effective; ZINC-
-similarity excluded as a plotted dimension). One standalone figure per
-uncertainty mode (no plot/subplot titles), each showing three populations:
-the SurfPro-MD training set, the SurfPro top-100 holdout, and the generated
-molecules (predicted, in the surrogate models' native units, inverting
-REINVENT's [0,1] score normalization using config.json's calibration bounds).
+similarity excluded as a plotted dimension). One figure, 2 columns
+(uncertainty mode none/LM) x 2 rows -- top row a random 2000-molecule
+subsample per Pareto arm (pooled across all replicates), bottom row the
+TOP 2000 by Score per Pareto arm (2026-08-04: a random subsample can miss
+most of the best-scoring molecules, which are exactly the interesting ones
+for a property-space plot). No plot/subplot titles. Each panel overlays
+three populations: the SurfPro-MD training set, the SurfPro holdout, and the
+generated molecules (predicted, in the surrogate models' native units,
+inverting REINVENT's [0,1] score normalization using config.json's
+calibration bounds).
 
 Usage:
     python workflow/make_pcmc_surften_scatter.py \
@@ -23,22 +28,22 @@ import numpy as np
 import pandas as pd
 
 UNC_ORDER = ["none", "lm"]
-UNC_FILENAME = {"none": "scatter_pcmc_surften_unc_none.png", "lm": "scatter_pcmc_surften_unc_lm.png"}
+UNC_SUFFIX = {"none": "", "lm": " + LM"}
 PARETO_ORDER = ["none", "boost", "gradient"]
-PARETO_LABELS = {"none": "Generated: no Pareto", "boost": "Generated: ParetoBoost", "gradient": "Generated: ParetoGradient"}
+PARETO_LABELS = {"none": "no Pareto", "boost": "ParetoBoost", "gradient": "ParetoGradient"}
 
 # Viridis, sampled at 3 well-separated points (requested 2026-08-04, replacing
 # the earlier CVD-validated categorical triplet).
 COLORS = {"none": "#471365", "boost": "#21918c", "gradient": "#bddf26"}
-HOLDOUT_COLOR = "#0b0b0b"
-TRAIN_COLOR = "#898781"
+HOLDOUT_COLOR = "#d62728"
+TRAIN_COLOR = "#0b0b0b"
 
 GRIDLINE = "#e1e0d9"
 AXIS_INK = "#c3c2b7"
 MUTED_INK = "#898781"
 PRIMARY_INK = "#0b0b0b"
 
-N_SUBSAMPLE = 1500
+N_POINTS = 2000
 SEED = 0
 
 XLABEL = "SurfTen (arb. units)"
@@ -52,7 +57,10 @@ def invert_score(score, min_value, max_value, minimize):
     return min_value + score * (max_value - min_value)
 
 
-def load_combo_points(combo_dir, bounds, rng):
+def load_combo_pool(combo_dir, bounds):
+    """Pooled (pcmc, surften, Score) across every accepted replicate for this
+    combo, artifact-filtered, un-subsampled -- both the random and top-N
+    selections are derived from this same pool."""
     dfs = []
     for rep_csv in sorted(glob.glob(f"{combo_dir}/production/rep_*/trial_1.csv")):
         # Skip partial leftovers from replicates the orchestrator didn't
@@ -62,7 +70,7 @@ def load_combo_points(combo_dir, bounds, rng):
         df = pd.read_csv(rep_csv, usecols=["pCMC (raw)", "SurfTen (raw)", "Score"])
         dfs.append(df)
     if not dfs:
-        return None, None
+        return None
     all_df = pd.concat(dfs, ignore_index=True).dropna()
     # Drop scoring-failure artifacts: extreme/out-of-distribution structures where
     # the surrogate pipeline fails and REINVENT floors every component (and Score)
@@ -70,11 +78,18 @@ def load_combo_points(combo_dir, bounds, rng):
     all_df = all_df[~((all_df["pCMC (raw)"] == 0) & (all_df["SurfTen (raw)"] == 0) & (all_df["Score"] == 0))]
     pcmc = invert_score(all_df["pCMC (raw)"], *bounds["pCMC"])
     surften = invert_score(all_df["SurfTen (raw)"], *bounds["SurfTen"])
-    n = len(pcmc)
-    if n > N_SUBSAMPLE:
-        idx = rng.choice(n, N_SUBSAMPLE, replace=False)
-        pcmc, surften = pcmc[idx], surften[idx]
-    return pcmc, surften
+    return pd.DataFrame({"pCMC": pcmc, "SurfTen": surften, "Score": all_df["Score"].to_numpy()})
+
+
+def select_random(pool, n, rng):
+    if len(pool) > n:
+        idx = rng.choice(len(pool), n, replace=False)
+        return pool.iloc[idx]
+    return pool
+
+
+def select_top(pool, n):
+    return pool.sort_values("Score", ascending=False).head(n)
 
 
 def style_axes(ax):
@@ -89,30 +104,24 @@ def style_axes(ax):
     ax.yaxis.label.set_color(PRIMARY_INK)
 
 
-def make_figure(combos_dir, bounds, train_df, holdout_df, unc, out_path):
-    rng = np.random.default_rng(SEED)
-    fig, ax = plt.subplots(figsize=(6, 5))
-
-    ax.scatter(train_df["SurfTen"], train_df["pCMC"], s=8, alpha=0.5, linewidths=0,
-               color=TRAIN_COLOR, label="Training set", zorder=2)
-    ax.scatter(holdout_df["SurfTen"], holdout_df["pCMC"], s=28, marker="*",
-               color=HOLDOUT_COLOR, label="Holdout test set", zorder=5, linewidths=0)
+def plot_panel(ax, pools, train_df, holdout_df, unc, select_fn):
+    # Layering (bottom -> top): training set, generated molecules, holdout.
+    ax.scatter(train_df["SurfTen"], train_df["pCMC"], s=14, alpha=0.65, linewidths=0,
+               marker="D", color=TRAIN_COLOR, label="Training set", zorder=2)
     for pareto in PARETO_ORDER:
-        combo_dir = f"{combos_dir}/zinc_off-unc_{unc}-pareto_{pareto}"
-        pcmc, surften = load_combo_points(combo_dir, bounds, rng)
-        if pcmc is None:
+        pool = pools[(unc, pareto)]
+        if pool is None:
             continue
-        ax.scatter(surften, pcmc, s=6, alpha=0.35, linewidths=0,
-                   color=COLORS[pareto], label=PARETO_LABELS[pareto], zorder=3)
+        sel = select_fn(pool)
+        ax.scatter(sel["SurfTen"], sel["pCMC"], s=6, alpha=0.55, linewidths=0,
+                   color=COLORS[pareto], label=f"{PARETO_LABELS[pareto]}{UNC_SUFFIX[unc]}", zorder=3)
+    ax.scatter(holdout_df["SurfTen"], holdout_df["pCMC"], s=32, marker="*",
+               color=HOLDOUT_COLOR, label="Holdout test set", zorder=5, linewidths=0)
 
     ax.set_xlabel(XLABEL)
     ax.set_ylabel(YLABEL)
     style_axes(ax)
     ax.legend(frameon=False, fontsize=9, loc="best", markerscale=2)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    print(f"saved -> {out_path}")
 
 
 def main():
@@ -136,9 +145,26 @@ def main():
     train_df = pd.read_csv(args.train_csv, usecols=["pCMC", "SurfTen"]).dropna()
     holdout_df = pd.read_csv(args.surfpro_holdout, usecols=["pCMC", "SurfTen"]).dropna()
 
+    pools = {}
     for unc in UNC_ORDER:
-        make_figure(args.combos_dir, bounds, train_df, holdout_df, unc,
-                    f"{args.out_dir}/{UNC_FILENAME[unc]}")
+        for pareto in PARETO_ORDER:
+            combo_dir = f"{args.combos_dir}/zinc_off-unc_{unc}-pareto_{pareto}"
+            print(f"loading {os.path.basename(combo_dir)}...", flush=True)
+            pools[(unc, pareto)] = load_combo_pool(combo_dir, bounds)
+
+    rng = np.random.default_rng(SEED)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    for col, unc in enumerate(UNC_ORDER):
+        plot_panel(axes[0][col], pools, train_df, holdout_df, unc,
+                   lambda pool: select_random(pool, N_POINTS, rng))
+        plot_panel(axes[1][col], pools, train_df, holdout_df, unc,
+                   lambda pool: select_top(pool, N_POINTS))
+
+    fig.tight_layout()
+    out_path = f"{args.out_dir}/scatter_pcmc_surften.png"
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"saved -> {out_path}")
 
 
 if __name__ == "__main__":

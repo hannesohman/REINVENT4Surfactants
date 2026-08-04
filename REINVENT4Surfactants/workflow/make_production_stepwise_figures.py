@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Publication-ready property-vs-molecules-generated figures for the production
+Publication-ready property-vs-molecules-generated figure for the production
 sweep, restricted to the ZINC-similarity-off, uncertainty-mode in {none, lm}
 combinations (2026-07-31: SM and SM+LM dropped as not effective; ZINC-
-similarity excluded as a plotted dimension throughout). One standalone figure
-per metric (no plot/subplot titles -- panel identity carries entirely in the
-legend), with gridlines and shaded +/-1 std error bands across replicates.
-Metrics: renormalized score, validity, novelty, internal diversity, and
-nearest-neighbor Tanimoto DISTANCE to the SurfPro top-100 HOLDOUT set (not
-the training set).
+similarity excluded as a plotted dimension throughout). One figure, one
+subplot per metric (no plot/subplot titles -- panel identity carries in the
+y-axis label; a single shared legend), with gridlines and shaded +/-1 std
+error bands across replicates. Metrics: renormalized score, validity,
+novelty, internal diversity, and nearest-neighbor Tanimoto DISTANCE to the
+SurfPro top-100 HOLDOUT set (not the training set).
 
 Metrics are computed over fixed-size bins of --bin-size (default 100)
 consecutively-generated molecules, not raw RL steps (2026-08-04): since step
@@ -54,12 +54,13 @@ MUTED_INK = "#898781"
 PRIMARY_INK = "#0b0b0b"
 
 METRICS = [
-    ("renormalized_score", "Renormalized score", "stepwise_renormalized_score.png"),
-    ("validity", "Validity (fraction)", "stepwise_validity.png"),
-    ("novelty", "Novelty (fraction)", "stepwise_novelty.png"),
-    ("internal_diversity", "Internal diversity (1 − mean Tanimoto similarity)", "stepwise_internal_diversity.png"),
-    ("nn_tanimoto_dist_to_holdout", "NN Tanimoto distance to holdout", "stepwise_tanimoto_dist_holdout.png"),
+    ("renormalized_score", "Renormalized score"),
+    ("novelty", "Novelty (fraction)"),
+    ("internal_diversity", "Internal diversity (1 − mean Tanimoto similarity)"),
+    ("nn_tanimoto_dist_to_holdout", "NN Tanimoto distance to holdout"),
+    ("validity", "Validity (fraction)"),
 ]
+GRID_SHAPE = (2, 3)  # 5 metrics + 1 shared-legend panel
 
 
 def bin_metrics(step_df: pd.DataFrame, trainval_set: set, holdout_fps: list) -> dict:
@@ -118,16 +119,6 @@ def load_combo_trajectory(combo_dir: str, trainval_set: set, holdout_fps: list, 
     return pd.DataFrame(rows)
 
 
-def make_legend(ax):
-    handles = []
-    for pareto in PARETO_ORDER:
-        handles.append(plt.Line2D([0], [0], color=COLORS[pareto], linewidth=2, label=PARETO_LABELS[pareto]))
-    for unc in UNC_ORDER:
-        handles.append(plt.Line2D([0], [0], color=PRIMARY_INK, linewidth=2,
-                                   linestyle=UNC_LINESTYLE[unc], label=UNC_LABELS[unc]))
-    ax.legend(handles=handles, frameon=False, fontsize=9, loc="best")
-
-
 def style_axes(ax):
     ax.grid(True, color=GRIDLINE, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
@@ -170,8 +161,11 @@ def main():
             traj = load_combo_trajectory(combo_dir, trainval_set, holdout_fps, args.bin_size)
             trajectories[(unc, pareto)] = traj.groupby("bin").agg(["mean", "std"])
 
-    for metric, ylabel, filename in METRICS:
-        fig, ax = plt.subplots(figsize=(6, 4.5))
+    nrows, ncols = GRID_SHAPE
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+    axes_flat = axes.flatten()
+
+    for ax, (metric, ylabel) in zip(axes_flat, METRICS):
         for unc in UNC_ORDER:
             for pareto in PARETO_ORDER:
                 agg = trajectories[(unc, pareto)]
@@ -188,12 +182,24 @@ def main():
         ax.set_xlabel("Molecules generated")
         ax.set_ylabel(ylabel)
         style_axes(ax)
-        make_legend(ax)
-        fig.tight_layout()
-        out_path = f"{args.out_dir}/{filename}"
-        fig.savefig(out_path, dpi=200, bbox_inches="tight")
-        plt.close(fig)
-        print(f"saved -> {out_path}")
+
+    # Remaining (unused) grid slots host the single shared legend instead of
+    # a per-panel one -- color/linestyle mean the same thing in every panel.
+    handles = []
+    for pareto in PARETO_ORDER:
+        handles.append(plt.Line2D([0], [0], color=COLORS[pareto], linewidth=2, label=PARETO_LABELS[pareto]))
+    for unc in UNC_ORDER:
+        handles.append(plt.Line2D([0], [0], color=PRIMARY_INK, linewidth=2,
+                                   linestyle=UNC_LINESTYLE[unc], label=UNC_LABELS[unc]))
+    for ax in axes_flat[len(METRICS):]:
+        ax.axis("off")
+    axes_flat[len(METRICS)].legend(handles=handles, frameon=False, fontsize=11, loc="center")
+
+    fig.tight_layout()
+    out_path = f"{args.out_dir}/stepwise_all.png"
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"saved -> {out_path}")
 
 
 if __name__ == "__main__":

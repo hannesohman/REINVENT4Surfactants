@@ -1448,28 +1448,21 @@ the 4 completed combinations and will be filled in fully once the last 2 land.
 | LM | none | 0.547 | 0.592 | 0.992 | 0.973 | 0.116 | 0.001 |
 
 `workflow/make_production_stepwise_figures.py` plots renormalized score,
-validity, novelty, internal diversity, and nearest-neighbor Tanimoto
-*distance to the SurfPro holdout* (not the training set) against cumulative
+novelty, internal diversity, nearest-neighbor Tanimoto *distance to the
+SurfPro holdout* (not the training set), and validity against cumulative
 **molecules generated** (2026-08-04: not raw RL step -- step count is derived
 per combination from a fixed 10,000-molecule oracle budget divided by that
 combination's own HPO-chosen batch size, so raw step counts range from 20 to
 1000 across combinations and aren't comparable). Each metric is computed over
 fixed 100-molecule bins regardless of the combination's own batch size, which
 also smooths out the very noisy per-step estimates small-batch combinations
-would otherwise have. Each metric is its own publication-ready figure (no
-plot/subplot titles; gridlines; shaded +/-1 std bands across replicates; axis
-labels with units where applicable): color encodes Pareto mode (viridis),
-line style encodes uncertainty mode (solid = none, dashed = LM).
+would otherwise have. One figure, one subplot per metric, sharing a single
+legend (no plot/subplot titles; gridlines; shaded +/-1 std bands across
+replicates; axis labels with units where applicable): color encodes Pareto
+mode (viridis), line style encodes uncertainty mode (solid = none, dashed =
+LM).
 
-![Renormalized score vs. molecules generated](figures/stepwise_renormalized_score.png)
-
-![Validity vs. molecules generated](figures/stepwise_validity.png)
-
-![Novelty vs. molecules generated](figures/stepwise_novelty.png)
-
-![Internal diversity vs. molecules generated](figures/stepwise_internal_diversity.png)
-
-![Nearest-neighbor Tanimoto distance to the holdout set vs. molecules generated](figures/stepwise_tanimoto_dist_holdout.png)
+![Renormalized score, novelty, internal diversity, NN-Tanimoto distance to holdout, and validity, all vs. molecules generated](figures/stepwise_all.png)
 
 **The score/diversity trade-off is a genuine training-time collapse, not
 just an endpoint difference.** Every panel shows renormalized score rising
@@ -1521,18 +1514,23 @@ chasing its own self-referential front rather than the true best molecules.
 
 **Property-space overlap remains strong despite near-zero exact rediscovery.**
 `workflow/make_pcmc_surften_scatter.py` plots SurfTen (x-axis) against pCMC
-(y-axis, predicted values in the surrogate models' native units), one
-publication-ready figure per uncertainty mode, each overlaying three
-populations: the SurfPro-MD training set (grey), the SurfPro holdout test set
-(black stars), and the generated molecules from all three Pareto arms
-(viridis). The generated clouds substantially overlap the true holdout's
-property region in both modes, even though essentially none of the exact
-molecules are recovered -- the model is learning to produce property-good
-molecules broadly, not memorizing/copying specific structures.
+(y-axis, predicted values in the surrogate models' native units) in one
+figure with 2 columns (uncertainty mode none/LM) x 2 rows: the top row a
+random 2000-molecule subsample per Pareto arm (pooled across all replicates),
+the bottom row the top 2000 by `Score` per Pareto arm instead (2026-08-04: a
+random subsample of a pool that can be ~200,000 molecules mostly misses the
+best-scoring ones, which are exactly the interesting ones here). Each panel
+overlays three populations: the SurfPro-MD training set (black diamonds,
+bottom layer), the generated molecules from all three Pareto arms (viridis,
+middle layer), and the SurfPro holdout test set (red stars, top layer). The
+generated clouds substantially overlap the true holdout's property region in
+both modes, even though essentially none of the exact molecules are
+recovered -- the model is learning to produce property-good molecules
+broadly, not memorizing/copying specific structures; the top-2000 row shows
+this more clearly than the random-subsample row, with a visibly tighter,
+well-defined high-scoring cluster per Pareto arm.
 
-![SurfTen vs pCMC, uncertainty mode: none](figures/scatter_pcmc_surften_unc_none.png)
-
-![SurfTen vs pCMC, uncertainty mode: LM](figures/scatter_pcmc_surften_unc_lm.png)
+![SurfTen vs pCMC: random 2000-molecule subsample (top row) vs. top 2000 by Score (bottom row), by uncertainty mode](figures/scatter_pcmc_surften.png)
 
 Full per-combination numbers (including per-replicate values and best HPO
 hyperparameters) are in `runs/production/comparison_table.csv` and the
