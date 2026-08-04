@@ -27,9 +27,9 @@ UNC_FILENAME = {"none": "scatter_pcmc_surften_unc_none.png", "lm": "scatter_pcmc
 PARETO_ORDER = ["none", "boost", "gradient"]
 PARETO_LABELS = {"none": "Generated: no Pareto", "boost": "Generated: ParetoBoost", "gradient": "Generated: ParetoGradient"}
 
-# dataviz skill categorical palette, slots 1-3 (blue/orange/aqua) -- the only
-# 3-color subset validated all-pairs (CVD + normal-vision) for scatter use.
-COLORS = {"none": "#2a78d6", "boost": "#eb6834", "gradient": "#1baf7a"}
+# Viridis, sampled at 3 well-separated points (requested 2026-08-04, replacing
+# the earlier CVD-validated categorical triplet).
+COLORS = {"none": "#471365", "boost": "#21918c", "gradient": "#bddf26"}
 HOLDOUT_COLOR = "#0b0b0b"
 TRAIN_COLOR = "#898781"
 
@@ -55,6 +55,10 @@ def invert_score(score, min_value, max_value, minimize):
 def load_combo_points(combo_dir, bounds, rng):
     dfs = []
     for rep_csv in sorted(glob.glob(f"{combo_dir}/production/rep_*/trial_1.csv")):
+        # Skip partial leftovers from replicates the orchestrator didn't
+        # accept (no eval.json) -- see make_production_stepwise_figures.py.
+        if not os.path.exists(os.path.join(os.path.dirname(rep_csv), "eval.json")):
+            continue
         df = pd.read_csv(rep_csv, usecols=["pCMC (raw)", "SurfTen (raw)", "Score"])
         dfs.append(df)
     if not dfs:

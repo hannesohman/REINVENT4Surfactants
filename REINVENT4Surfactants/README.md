@@ -1430,115 +1430,105 @@ and TL checkpoint (same HPO/replicate/steps budget as before). One job
 and 3/5 replicates; resubmitted with a longer walltime and the existing
 resume-from-cache logic picked up exactly where it left off. Results below.
 
-### Results (re-run with the corrected holdout)
+### Results (current sweep, 2026-08-04 -- 4 of 6 combinations complete)
 
-**2026-07-31: SM and SM+LM dropped.** Across the marginal-effects analysis
-below, SM and SM+LM never beat plain `none`/LM on renormalized score and
-didn't add a clearly distinct qualitative pattern beyond what LM already
-shows -- so subsequent figures keep only the `none` and `LM` uncertainty
-modes (and remain ZINC-similarity-off only, per the earlier decision). The
-aggregate numbers for SM/SM+LM from the full 24-combination sweep are kept
-below for the record, but are no longer carried forward into new figures.
+The design is now 2 uncertainty modes (`none`, LM) x 3 Pareto modes
+(`none`/`ParetoBoost`/`ParetoGradient`), ZINC-similarity-off only, 20
+replicates each, oracle-budget/batch-size-decoupled HPO (see Findings above)
+-- superseding all earlier sweeps (24-combination and the first 12/6-combination
+re-run), whose numbers are no longer reported here. `zinc_off-unc_lm-pareto_boost`
+and `zinc_off-unc_lm-pareto_gradient` are still running; this section covers
+the 4 completed combinations and will be filled in fully once the last 2 land.
+
+| unc_mode | pareto_mode | renorm. score | internal diversity | validity | novelty | ZINC top-100 | SurfPro top-100 |
+|---|---|---|---|---|---|---|---|
+| none | none | 0.538 | 0.650 | 0.988 | 0.970 | 0.115 | 0.003 |
+| none | boost | 0.424 | 0.708 | 0.938 | 0.994 | 0.018 | 0.001 |
+| none | gradient | 0.536 | 0.661 | 0.994 | 0.962 | 0.134 | 0.000 |
+| LM | none | 0.547 | 0.592 | 0.992 | 0.973 | 0.116 | 0.001 |
 
 `workflow/make_production_stepwise_figures.py` plots renormalized score,
 validity, novelty, internal diversity, and nearest-neighbor Tanimoto
-*distance to the SurfPro top-100 holdout* (not the training set) as a
-function of RL step. Each is its own publication-ready figure (no plot/
-subplot titles; gridlines; shaded +/-1 std bands across the 5 replicates;
-axis labels with units where applicable): color encodes Pareto mode, line
-style encodes uncertainty mode (solid = none, dashed = LM).
+*distance to the SurfPro holdout* (not the training set) against cumulative
+**molecules generated** (2026-08-04: not raw RL step -- step count is derived
+per combination from a fixed 10,000-molecule oracle budget divided by that
+combination's own HPO-chosen batch size, so raw step counts range from 20 to
+1000 across combinations and aren't comparable). Each metric is computed over
+fixed 100-molecule bins regardless of the combination's own batch size, which
+also smooths out the very noisy per-step estimates small-batch combinations
+would otherwise have. Each metric is its own publication-ready figure (no
+plot/subplot titles; gridlines; shaded +/-1 std bands across replicates; axis
+labels with units where applicable): color encodes Pareto mode (viridis),
+line style encodes uncertainty mode (solid = none, dashed = LM).
 
-![Renormalized score vs. RL step](figures/stepwise_renormalized_score.png)
+![Renormalized score vs. molecules generated](figures/stepwise_renormalized_score.png)
 
-![Validity vs. RL step](figures/stepwise_validity.png)
+![Validity vs. molecules generated](figures/stepwise_validity.png)
 
-![Novelty vs. RL step](figures/stepwise_novelty.png)
+![Novelty vs. molecules generated](figures/stepwise_novelty.png)
 
-![Internal diversity vs. RL step](figures/stepwise_internal_diversity.png)
+![Internal diversity vs. molecules generated](figures/stepwise_internal_diversity.png)
 
-![Nearest-neighbor Tanimoto distance to the holdout set vs. RL step](figures/stepwise_tanimoto_dist_holdout.png)
+![Nearest-neighbor Tanimoto distance to the holdout set vs. molecules generated](figures/stepwise_tanimoto_dist_holdout.png)
 
 **The score/diversity trade-off is a genuine training-time collapse, not
 just an endpoint difference.** Every panel shows renormalized score rising
-and internal diversity + novelty falling as RL progresses -- the standard
-exploration/exploitation signature -- but the *rate* of that collapse
-differs sharply by uncertainty mode. Loss Modulation (LM) shows by far the
-steepest diversity collapse of any mode, falling from ~0.77 to as low as
-0.2-0.4 by step 20 depending on the Pareto arm; Score Modulation (SM) barely
-loses diversity at all over the full 20 steps (staying in 0.71-0.77
-throughout). This directly explains the aggregate finding that LM has the
-lowest marginal diversity and SM the highest: LM's low endpoint diversity is
-the result of an active, ongoing collapse during training, not a static
-property of its optimum.
+and internal diversity falling as RL progresses -- the standard
+exploration/exploitation signature. `ParetoBoost` is the clear outlier: its
+renormalized-score trajectory is visibly noisier than the other two Pareto
+modes throughout training and never converges as high (~0.44-0.52 vs.
+~0.55-0.60), while its diversity declines the *slowest* of the three (ending
+around 0.55-0.65 vs. ~0.35-0.5) -- worse mean score, but less exploration
+collapse, not a strict improvement or regression on either axis alone.
 
-**Pareto-mode differentiation grows over training rather than being present
-from the start.** In the SM panel, ParetoGradient's renormalized-score
-advantage over ParetoBoost/none is negligible for the first ~5 steps and
-only widens into a large gap (0.47 vs. ~0.40) by step 20 -- a pattern the
-single-endpoint bar charts couldn't show. Novelty and holdout-distance track
-the same shape as diversity (rising/falling together), consistent with all
-three being facets of the same exploration-exhaustion process rather than
-independent effects.
+**`ParetoBoost` has far higher run-to-run variance than either alternative**
+(prompted by a direct question about the width of its error band): comparing
+the 3 Pareto modes at uncertainty=`none` (n=19-20 replicates each, so this
+isn't a sample-size artifact),
 
-**SurfPro top-100 rediscovery is now at floor everywhere (0.0-0.5%),** as it
-should be for a genuinely disjoint holdout: with only 20 RL steps and 5
-replicates per combination, exactly regenerating one of 105 held-out
-molecules that share no scaffold with anything seen during transfer learning
-is a rare event by design, not a bug. This is itself confirmation of how much
-the previous 9-36% figures were inflated by the homolog leak, and means
-SurfPro rediscovery isn't a useful discriminator between combinations at this
-compute budget -- a real generalization test at this holdout's difficulty
-would need substantially more RL steps and/or larger sampling budgets, which
-is future work rather than something to chase within this sweep.
+| pareto_mode | renorm. score std | internal diversity std |
+|---|---|---|
+| none | 0.019 | 0.046 |
+| **boost** | **0.063** (3.3x) | **0.105** (2.3x) |
+| gradient | 0.017 | 0.048 |
 
-**ZINC top-100 rediscovery is the informative rediscovery metric this time**
-(12-23% across combinations, unaffected by the SurfPro-side leak since it's
-built independently from the ZINC catalog). Marginally, ZINC-similarity
-being *on* only helps this metric when no Pareto term is active (0.207 vs.
-0.165-0.171 for boost/gradient); with ZINC-similarity off, all three Pareto
-modes give similar rediscovery (~0.164-0.175). So "no Pareto is better for
-rediscovery" -- the headline finding from the first (leaky) sweep -- only
-replicates here conditional on ZINC-similarity being on.
+`ParetoBoost`'s reward is discontinuous -- a molecule either gets the full
+boost or none of it, based on whether it dominates the *empirical* Pareto
+front built from that same run's own earlier generations (Methods). That
+front is seeded by whichever molecules happen to be sampled first, which
+differs by chance across replicates from the same starting checkpoint.
+Because the reward is all-or-nothing rather than graded, small early
+differences in which molecules establish the initial front can compound into
+very different policies by the end of training -- a sensitivity-to-initial-
+conditions effect. `ParetoGradient`'s continuous distance-to-front reward
+(near-misses get partial credit) doesn't show this, nor does dropping the
+Pareto term entirely; both land at ordinary run-to-run RL noise levels. One
+`ParetoBoost` replicate's low validity (0.75 vs. 0.94-0.98 for the rest) is
+consistent with the same elevated-variance story extending beyond just score
+and diversity.
 
-**Score Modulation (SM) now raises internal diversity and ZINC rediscovery
-the most,** rather than being roughly neutral as in the first sweep: SM has
-the highest marginal internal diversity (0.746) and ZINC top-100 rate
-(0.202) of the four uncertainty modes, at the cost of the lowest
-renormalized score (0.416) and lowest novelty (0.894). Loss Modulation (LM)
-remains the mirror image -- highest renormalized score (0.486, tied with
-`none`) but lowest diversity (0.662) and lowest ZINC rediscovery (0.157) --
-consistent with the same score/diversity trade-off documented before: LM
-sharpens the raw optimization target at the cost of exploration.
+**SurfPro top-100 rediscovery is at floor everywhere (0.0-0.3%),** as
+expected for a genuinely scaffold-disjoint holdout (see the leakage Findings
+above): with a 10,000-molecule budget, exactly regenerating one of 105
+held-out molecules sharing no scaffold with anything seen during transfer
+learning is a rare event by design, not a bug.
 
-**ZINC-similarity's marginal effect stays small and roughly a wash**, same
-conclusion as the first sweep: renormalized score (0.457 off vs. 0.451 on),
-novelty (0.928 vs. 0.924), and diversity (0.708 vs. 0.701) are all within
-noise of each other. It does raise nearest-neighbor training-set similarity
-slightly (0.766 to 0.781), consistent with the plausibility term nudging
-generation toward more familiar structural motifs.
-
-**Top combinations by renormalized score** are dominated by Loss Modulation
-without SM: ZINC off/LM/ParetoGradient (0.536), ZINC off/LM/none (0.533),
-ZINC off/none/none (0.518). **Top combinations by ZINC top-100 rediscovery**
-are a different, SM-favoring set: ZINC off/SM/ParetoGradient (0.232), ZINC
-off/SM+LM/none (0.224), ZINC on/none/ParetoGradient (0.218) -- reinforcing
-that no single combination dominates both the raw-score and the
-rediscovery/diversity axes; which one to prefer depends on whether the goal
-is pushing the surrogate objective as hard as possible or generating a
-broader, more literature-similar set of candidates.
+**ZINC top-100 rediscovery is the informative rediscovery metric here**
+(1.8-13.4% across the 4 completed combinations). `ParetoBoost` is again the
+outlier, at roughly 6x lower rediscovery (0.018) than `none`/`ParetoGradient`
+(0.115/0.134) -- consistent with its policy spending more of its budget
+chasing its own self-referential front rather than the true best molecules.
 
 **Property-space overlap remains strong despite near-zero exact rediscovery.**
 `workflow/make_pcmc_surften_scatter.py` plots SurfTen (x-axis) against pCMC
 (y-axis, predicted values in the surrogate models' native units), one
-publication-ready figure per uncertainty mode (`none`/LM; ZINC-similarity-off
-only), each overlaying three populations: the SurfPro-MD training set (grey),
-the SurfPro top-100 holdout test set (black stars), and the generated
-molecules from all three Pareto arms (colored). The generated clouds
-substantially overlap the true top-100's property region in both modes, even
-though essentially none of the exact molecules are recovered -- the model is
-learning to produce property-good molecules broadly, not memorizing/copying
-specific structures, which is the intended behavior once homolog leakage is
-removed.
+publication-ready figure per uncertainty mode, each overlaying three
+populations: the SurfPro-MD training set (grey), the SurfPro holdout test set
+(black stars), and the generated molecules from all three Pareto arms
+(viridis). The generated clouds substantially overlap the true holdout's
+property region in both modes, even though essentially none of the exact
+molecules are recovered -- the model is learning to produce property-good
+molecules broadly, not memorizing/copying specific structures.
 
 ![SurfTen vs pCMC, uncertainty mode: none](figures/scatter_pcmc_surften_unc_none.png)
 
@@ -1546,7 +1536,11 @@ removed.
 
 Full per-combination numbers (including per-replicate values and best HPO
 hyperparameters) are in `runs/production/comparison_table.csv` and the
-individual `runs/production/<combo>/final_result.json` files.
+individual `runs/production/<combo>/final_result.json` files. Replicates
+without an `eval.json` (a handful failed with a rare `infinity or value too
+large` error in the surrogate/uncertainty pipeline for a specific generated
+molecule, <1% of replicates run so far) are excluded from both the table and
+the figures above.
 
 ### Findings (2026-08-03): HPO's batch-size preference was an objective artifact; fixed, plus more replicates and a Pareto-component efficiency fix
 
