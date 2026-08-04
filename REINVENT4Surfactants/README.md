@@ -1456,13 +1456,21 @@ combination's own HPO-chosen batch size, so raw step counts range from 20 to
 1000 across combinations and aren't comparable). Each metric is computed over
 fixed 100-molecule bins regardless of the combination's own batch size, which
 also smooths out the very noisy per-step estimates small-batch combinations
-would otherwise have. One figure, one subplot per metric, sharing a single
-legend (no plot/subplot titles; gridlines; shaded +/-1 std bands across
-replicates; axis labels with units where applicable): color encodes Pareto
-mode (viridis), line style encodes uncertainty mode (solid = none, dashed =
-LM).
+would otherwise have. Five of the six panels are these trajectories; the
+sixth is a grouped bar chart of mean rediscovery rate (+/-1 std across
+replicates) against three independent references -- SurfPro holdout, ZINC
+top-100, and ChEMBL (fraction of the top-5% generated molecules, by `Score`,
+that already exist in ChEMBL by exact or skeleton-level InChIKey match --
+same percentile convention as the HPO objective; computed fresh per
+replicate here via `workflow/check_chembl_membership.py`'s reference data,
+never previously run against real production output). One figure total,
+sharing a single legend (no plot/subplot titles; gridlines; shaded +/-1 std
+bands on the trajectories, error bars on the rediscovery bars; axis labels
+with units where applicable): color encodes Pareto mode (viridis) throughout;
+uncertainty mode is solid/dashed for the line panels and unhatched/hatched
+for the bars.
 
-![Renormalized score, novelty, internal diversity, NN-Tanimoto distance to holdout, and validity, all vs. molecules generated](figures/stepwise_all.png)
+![Renormalized score, novelty, internal diversity, NN-Tanimoto distance to holdout, and validity vs. molecules generated, plus mean SurfPro/ZINC/ChEMBL rediscovery rate](figures/stepwise_all.png)
 
 **The score/diversity trade-off is a genuine training-time collapse, not
 just an endpoint difference.** Every panel shows renormalized score rising

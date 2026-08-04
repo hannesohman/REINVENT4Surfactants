@@ -26,6 +26,8 @@ Usage:
 """
 import argparse
 import glob
+import gzip
+import json
 import os
 import sys
 
@@ -33,6 +35,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from rdkit import Chem, RDLogger
+from rdkit.Chem import inchi
 
 sys.path.insert(0, os.path.dirname(__file__))
 from evaluate_run import canon, morgan_fp, internal_diversity, nn_tanimoto_similarity  # noqa: E402
@@ -60,7 +63,11 @@ METRICS = [
     ("nn_tanimoto_dist_to_holdout", "NN Tanimoto distance to holdout"),
     ("validity", "Validity (fraction)"),
 ]
-GRID_SHAPE = (2, 3)  # 5 metrics + 1 shared-legend panel
+GRID_SHAPE = (2, 3)  # 5 metrics + 1 rediscovery-rate bar panel
+
+REDISCOVERY_SOURCES = ["surfpro", "zinc", "chembl"]
+REDISCOVERY_LABELS = {"surfpro": "SurfPro", "zinc": "ZINC", "chembl": "ChEMBL"}
+CHEMBL_TOP_PCT = 5.0  # same percentile convention as the HPO objective
 
 
 def bin_metrics(step_df: pd.DataFrame, trainval_set: set, holdout_fps: list) -> dict:
@@ -119,6 +126,58 @@ def load_combo_trajectory(combo_dir: str, trainval_set: set, holdout_fps: list, 
     return pd.DataFrame(rows)
 
 
+def load_chembl_reference(path):
+    with gzip.open(path, "rt") as f:
+        ref = json.load(f)
+    return set(ref["inchikeys_full"]), set(ref["inchikeys_skeleton"])
+
+
+def to_inchikey(smi):
+    mol = Chem.MolFromSmiles(smi)
+    if mol is None:
+        return None
+    try:
+        return inchi.MolToInchiKey(mol)
+    except Exception:
+        return None
+
+
+def chembl_replicate_rate(rep_csv, full_set, skeleton_set, top_pct=CHEMBL_TOP_PCT):
+    """Fraction of the top top_pct% (by Score) unique valid molecules in this
+    replicate that already exist in ChEMBL (exact InChIKey or skeleton-only
+    match) -- same percentile convention as the HPO objective."""
+    df = pd.read_csv(rep_csv, usecols=["SMILES", "Score"])
+    valid = df["SMILES"].apply(lambda s: isinstance(s, str) and Chem.MolFromSmiles(s) is not None)
+    df = df[valid]
+    unique_df = df.drop_duplicates(subset=["SMILES"])
+    n_top = max(1, round(len(unique_df) * top_pct / 100))
+    top_df = unique_df.sort_values("Score", ascending=False).head(n_top)
+    keys = top_df["SMILES"].apply(to_inchikey).dropna()
+    if keys.empty:
+        return float("nan")
+    skeletons = keys.str[:14]
+    hits = keys.isin(full_set) | skeletons.isin(skeleton_set)
+    return float(hits.mean())
+
+
+def load_rediscovery_rates(combo_dir, full_set, skeleton_set):
+    """Per-replicate SurfPro/ZINC/ChEMBL rediscovery rates for one
+    combination -- SurfPro/ZINC come straight from each replicate's own
+    eval.json (already computed by run_production_combo.py); ChEMBL is
+    computed fresh here (never run against real production output before)."""
+    rates = {src: [] for src in REDISCOVERY_SOURCES}
+    for rep_csv in sorted(glob.glob(f"{combo_dir}/production/rep_*/trial_1.csv")):
+        eval_path = os.path.join(os.path.dirname(rep_csv), "eval.json")
+        if not os.path.exists(eval_path):
+            continue
+        with open(eval_path) as f:
+            result = json.load(f)
+        rates["surfpro"].append(result["surfpro_top100"]["rate"])
+        rates["zinc"].append(result["zinc_top100"]["rate"])
+        rates["chembl"].append(chembl_replicate_rate(rep_csv, full_set, skeleton_set))
+    return {src: (float(np.mean(v)), float(np.std(v))) for src, v in rates.items()}
+
+
 def style_axes(ax):
     ax.grid(True, color=GRIDLINE, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
@@ -137,6 +196,7 @@ def main():
     ap.add_argument("--train-csv", default="data/surfpro_expanded_trainval_only.csv")
     ap.add_argument("--train-smiles-col", default="SMILES_canonical")
     ap.add_argument("--surfpro-holdout", default="data/surfpro_real_holdout_test_split.csv")
+    ap.add_argument("--chembl-reference", default="data/chembl_reference.json.gz")
     ap.add_argument("--out-dir", default="figures")
     ap.add_argument("--bin-size", type=int, default=100,
                      help="molecules per plotted point, regardless of each combo's own batch size")
@@ -152,7 +212,11 @@ def main():
     holdout_fps = [morgan_fp(m) for m in holdout_mols]
     print(f"trainval: {len(trainval_set)} molecules, holdout: {len(holdout_fps)} molecules", flush=True)
 
+    print(f"loading ChEMBL reference from {args.chembl_reference} ...", flush=True)
+    chembl_full, chembl_skeleton = load_chembl_reference(args.chembl_reference)
+
     trajectories = {}
+    rediscovery = {}
     for unc in UNC_ORDER:
         for pareto in PARETO_ORDER:
             name = f"zinc_off-unc_{unc}-pareto_{pareto}"
@@ -160,6 +224,7 @@ def main():
             print(f"processing {name}...", flush=True)
             traj = load_combo_trajectory(combo_dir, trainval_set, holdout_fps, args.bin_size)
             trajectories[(unc, pareto)] = traj.groupby("bin").agg(["mean", "std"])
+            rediscovery[(unc, pareto)] = load_rediscovery_rates(combo_dir, chembl_full, chembl_skeleton)
 
     nrows, ncols = GRID_SHAPE
     fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
@@ -183,17 +248,43 @@ def main():
         ax.set_ylabel(ylabel)
         style_axes(ax)
 
-    # Remaining (unused) grid slots host the single shared legend instead of
-    # a per-panel one -- color/linestyle mean the same thing in every panel.
+    # Last grid slot: mean rediscovery rate per source (SurfPro/ZINC/ChEMBL),
+    # grouped bars per combination, +/-1 std error bars across replicates.
+    # Color = Pareto mode (matches the line panels); hatch = uncertainty mode
+    # (solid fill = none, diagonal hatch = LM), since color alone is already
+    # used for Pareto mode in this figure.
+    rax = axes_flat[len(METRICS)]
+    combos = [(unc, pareto) for unc in UNC_ORDER for pareto in PARETO_ORDER]
+    n_bars = len(combos)
+    bar_width = 0.8 / n_bars
+    group_x = np.arange(len(REDISCOVERY_SOURCES))
+    for i, (unc, pareto) in enumerate(combos):
+        means = [rediscovery[(unc, pareto)][src][0] for src in REDISCOVERY_SOURCES]
+        stds = [rediscovery[(unc, pareto)][src][1] for src in REDISCOVERY_SOURCES]
+        x = group_x + (i - (n_bars - 1) / 2) * bar_width
+        rax.bar(x, means, bar_width, yerr=stds, capsize=2, color=COLORS[pareto],
+                hatch="////" if unc == "lm" else None, edgecolor="white", linewidth=0.5)
+    rax.set_xticks(group_x)
+    rax.set_xticklabels([REDISCOVERY_LABELS[s] for s in REDISCOVERY_SOURCES])
+    rax.set_ylabel("Rediscovery rate")
+    style_axes(rax)
+    rax.grid(axis="x", visible=False)
+
+    for ax in axes_flat[len(METRICS) + 1:]:
+        ax.axis("off")
+
+    # Single shared legend for the whole figure (line style/hatch both mean
+    # "uncertainty mode"; color means "Pareto mode" in every panel).
     handles = []
     for pareto in PARETO_ORDER:
         handles.append(plt.Line2D([0], [0], color=COLORS[pareto], linewidth=2, label=PARETO_LABELS[pareto]))
     for unc in UNC_ORDER:
         handles.append(plt.Line2D([0], [0], color=PRIMARY_INK, linewidth=2,
-                                   linestyle=UNC_LINESTYLE[unc], label=UNC_LABELS[unc]))
-    for ax in axes_flat[len(METRICS):]:
-        ax.axis("off")
-    axes_flat[len(METRICS)].legend(handles=handles, frameon=False, fontsize=11, loc="center")
+                                   linestyle=UNC_LINESTYLE[unc], label=f"{UNC_LABELS[unc]} (lines)"))
+    handles.append(plt.Rectangle((0, 0), 1, 1, facecolor="none", edgecolor=PRIMARY_INK, label="Uncertainty: none (bars)"))
+    handles.append(plt.Rectangle((0, 0), 1, 1, facecolor="none", edgecolor=PRIMARY_INK, hatch="////", label="Uncertainty: LM (bars)"))
+    fig.legend(handles=handles, frameon=False, fontsize=10, ncol=len(handles),
+               loc="lower center", bbox_to_anchor=(0.5, -0.03))
 
     fig.tight_layout()
     out_path = f"{args.out_dir}/stepwise_all.png"
